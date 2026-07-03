@@ -62,9 +62,10 @@ jar {
 
 modrinth {
 	token = System.getenv("MODRINTH_TOKEN")
-	projectId = "combat-persistence" // Modrinth project slug — verify it matches your project URL
+	projectId = "combat-persistence"
 	versionNumber = project.version
 	versionType = "release"
+	changelog = "See https://github.com/PottersGame/combat-persistance/releases/tag/v${project.version}"
 	gameVersions = [project.minecraft_version]
 	loaders = ["fabric"]
 	dependencies {
