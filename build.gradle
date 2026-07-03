@@ -66,6 +66,9 @@ modrinth {
 	versionNumber = project.version
 	versionType = "release"
 	changelog = "See https://github.com/PottersGame/combat-persistance/releases/tag/v${project.version}"
+	// This loom setup has no remapJar task (mojmap runtime), so Minotaur
+	// cannot auto-detect the upload file — point it at the plain jar.
+	uploadFile = tasks.jar
 	gameVersions = [project.minecraft_version]
 	loaders = ["fabric"]
 	dependencies {
