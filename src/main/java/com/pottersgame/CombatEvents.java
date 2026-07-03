@@ -17,6 +17,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
@@ -103,6 +104,13 @@ public class CombatEvents {
                 if (!tracker.isNpcActive(entity.getUUID())) {
                     entity.discard();
                 }
+            } else if (entity instanceof Mannequin && tracker.isNpcActive(entity.getUUID())) {
+                // NPCs saved to disk by older versions reload as plain vanilla
+                // mannequins (they share the mannequin entity type) with none of the
+                // CombatNPC despawn logic. CombatNPCs are never saved anymore, so any
+                // tracked NPC UUID loading from a chunk is such a stale leftover. The
+                // tracker entry stays so the player still gets their items on rejoin.
+                entity.discard();
             }
         });
 

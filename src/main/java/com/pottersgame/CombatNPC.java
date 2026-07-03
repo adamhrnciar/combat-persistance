@@ -166,6 +166,17 @@ public class CombatNPC extends Mannequin {
     }
 
     @Override
+    public boolean shouldBeSaved() {
+        // Never write the NPC to chunk NBT. It shares the vanilla mannequin entity
+        // type (required so vanilla clients can join), so a chunk reload or server
+        // restart would re-instantiate it as a plain Mannequin with none of this
+        // class's despawn/death logic — an immortal decoration stuck in the world.
+        // The inventory is already persisted in the tracker's JSON and is restored
+        // to the player on their next join, so nothing is lost by not saving it.
+        return false;
+    }
+
+    @Override
     public void die(DamageSource damageSource) {
         if (!hasDropped) {
             // Broadcast the kill
@@ -190,6 +201,13 @@ public class CombatNPC extends Mannequin {
     @Override
     public void tick() {
         super.tick();
-        this.setDeltaMovement(new Vec3(0, this.getDeltaMovement().y, 0)); 
+        this.setDeltaMovement(new Vec3(0, this.getDeltaMovement().y, 0));
+
+        // Safety net: if the tracker no longer knows this NPC (player rejoined and
+        // was restored, or the entry was cleaned up), the entity must not linger.
+        if (!this.level().isClientSide() && this.tickCount % 20 == 0 && !this.isRemoved()
+                && !Combatpersistence.tracker.isNpcActive(this.getUUID())) {
+            this.discard();
+        }
     }
 }

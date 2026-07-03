@@ -197,43 +197,67 @@ public class SkinManager {
     private static void refreshPlayer(ServerPlayer player) {
         if (!(player.level() instanceof ServerLevel world)) return;
         MinecraftServer server = world.getServer();
-        List<ServerPlayer> players = server.getPlayerList().getPlayers();
-        
-        ClientboundPlayerInfoRemovePacket removePacket = new ClientboundPlayerInfoRemovePacket(List.of(player.getUUID()));
-        ClientboundPlayerInfoUpdatePacket addPacket = ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(player));
 
-        for (ServerPlayer viewer : players) {
-            viewer.connection.send(removePacket);
-            viewer.connection.send(addPacket);
+        // Refresh the tab-list entry (which carries the skin) for everyone.
+        server.getPlayerList().broadcastAll(new ClientboundPlayerInfoRemovePacket(List.of(player.getUUID())));
+        server.getPlayerList().broadcastAll(ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(player)));
 
-            // If the viewer is the player themselves, we need a more forceful update
-            if (viewer == player) {
-                // Send a respawn packet with KEEP_ALL_DATA to force entity recreation without losing state
-                player.connection.send(new ClientboundRespawnPacket(player.createCommonSpawnInfo(world), (byte) 3));
-                
-                // Teleport them to their current position to trigger the camera/position sync
-                TeleportTransition transition = new TeleportTransition(
-                    world,
-                    player.position(),
-                    player.getDeltaMovement(),
-                    player.getYRot(),
-                    player.getXRot(),
-                    TeleportTransition.DO_NOTHING
-                );
-                player.teleport(transition);
-                
-                // Refresh abilities and inventory sync
-                player.onUpdateAbilities();
-                server.getPlayerList().sendPlayerPermissionLevel(player);
-                server.getPlayerList().sendLevelInfo(player, world);
-                server.getPlayerList().sendAllPlayerInfo(player);
-                player.containerMenu.sendAllDataToRemote();
-            } else if (viewer.level() == player.level()) {
-                // Force recreation for other viewers to refresh the skin
-                viewer.connection.send(new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(player.getId()));
-                viewer.connection.send(new net.minecraft.network.protocol.game.ClientboundAddEntityPacket(player, 0, player.blockPosition()));
-                viewer.connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(player.getId(), player.getEntityData().getNonDefaultValues()));
+        // Re-spawn the entity ONLY for clients the entity tracker is actually
+        // pairing with this player. Hand-sending spawn packets to everyone in the
+        // dimension (as this used to do) created ghost copies on clients out of
+        // tracking range — a frozen duplicate the tracker never moves or removes —
+        // and could race the join-time pairing, leaving the real player invisible.
+        // At join time nothing is tracking yet, so nothing is sent here and the
+        // initial pairing already carries the updated profile.
+        world.getChunkSource().sendToTrackingPlayers(player,
+            new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(player.getId()));
+        world.getChunkSource().sendToTrackingPlayers(player,
+            new net.minecraft.network.protocol.game.ClientboundAddEntityPacket(
+                player.getId(), player.getUUID(),
+                player.getX(), player.getY(), player.getZ(),
+                player.getXRot(), player.getYRot(),
+                net.minecraft.world.entity.EntityTypes.PLAYER, 0,
+                player.getDeltaMovement(), player.getYHeadRot()));
+
+        List<net.minecraft.network.syncher.SynchedEntityData.DataValue<?>> entityData = player.getEntityData().getNonDefaultValues();
+        if (entityData != null && !entityData.isEmpty()) {
+            world.getChunkSource().sendToTrackingPlayers(player,
+                new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(player.getId(), entityData));
+        }
+
+        // The freshly re-spawned entity has no equipment client-side; resend it.
+        List<com.mojang.datafixers.util.Pair<net.minecraft.world.entity.EquipmentSlot, net.minecraft.world.item.ItemStack>> equipment = new java.util.ArrayList<>();
+        for (net.minecraft.world.entity.EquipmentSlot slot : net.minecraft.world.entity.EquipmentSlot.values()) {
+            net.minecraft.world.item.ItemStack stack = player.getItemBySlot(slot);
+            if (!stack.isEmpty()) {
+                equipment.add(com.mojang.datafixers.util.Pair.of(slot, stack.copy()));
             }
         }
+        if (!equipment.isEmpty()) {
+            world.getChunkSource().sendToTrackingPlayers(player,
+                new net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket(player.getId(), equipment));
+        }
+
+        // The player's own client needs a more forceful update.
+        // Send a respawn packet with KEEP_ALL_DATA to force entity recreation without losing state
+        player.connection.send(new ClientboundRespawnPacket(player.createCommonSpawnInfo(world), (byte) 3));
+
+        // Teleport them to their current position to trigger the camera/position sync
+        TeleportTransition transition = new TeleportTransition(
+            world,
+            player.position(),
+            player.getDeltaMovement(),
+            player.getYRot(),
+            player.getXRot(),
+            TeleportTransition.DO_NOTHING
+        );
+        player.teleport(transition);
+
+        // Refresh abilities and inventory sync
+        player.onUpdateAbilities();
+        server.getPlayerList().sendPlayerPermissionLevel(player);
+        server.getPlayerList().sendLevelInfo(player, world);
+        server.getPlayerList().sendAllPlayerInfo(player);
+        player.containerMenu.sendAllDataToRemote();
     }
 }
