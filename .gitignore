@@ -45,7 +45,8 @@ replay_*.log
 !.gemini/mc-lookup.py
 .gemini/__pycache__/
 .rtk/
-.claude/
+.claude/*
+!.claude/skills/
 GEMINI.md
 CLAUDE.md
 gha-creds-*.json
