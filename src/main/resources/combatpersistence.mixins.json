@@ -6,12 +6,10 @@
 		"CombatCommandMixin",
 		"CombatDeathMixin",
 		"CombatPickupMixin",
-		"EnderChestBlockMixin"
+		"EnderChestBlockMixin",
+		"PlayerAccessor"
 	],
 	"injectors": {
 		"defaultRequire": 1
-	},
-	"overwrites": {
-		"requireAnnotations": true
 	}
 }

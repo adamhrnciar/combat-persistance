@@ -16,7 +16,7 @@ public class CombatPickupMixin {
     private void onPlayerTouch(Player player, CallbackInfo ci) {
         if (player instanceof ServerPlayer sp) {
             // Block pickup if not authenticated
-            if (Combatpersistence.config.enableAuth && !Combatpersistence.authManager.isAuthenticated(sp)) {
+            if (!Combatpersistence.authManager.isAuthenticated(sp)) {
                 ci.cancel();
                 return;
             }

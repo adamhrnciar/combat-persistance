@@ -25,7 +25,9 @@ public class CombatDeathMixin {
     @Inject(method = "tick", at = @At("HEAD"))
     private void onTick(CallbackInfo ci) {
         if ((Object)this instanceof ServerPlayer player) {
-            if (Combatpersistence.config.enableAuth && !Combatpersistence.authManager.isAuthenticated(player)) {
+            // isAuthenticated already covers "auth doesn't apply here" (disabled
+            // or online-mode server), so no extra enableAuth check is needed.
+            if (!Combatpersistence.authManager.isAuthenticated(player)) {
                 // Stop momentum
                 player.setDeltaMovement(0, 0, 0);
                 
@@ -44,7 +46,7 @@ public class CombatDeathMixin {
     @Inject(method = "isInvulnerableTo", at = @At("HEAD"), cancellable = true)
     private void onIsInvulnerableTo(ServerLevel level, DamageSource source, CallbackInfoReturnable<Boolean> cir) {
         if ((Object)this instanceof ServerPlayer player) {
-            if (Combatpersistence.config.enableAuth && !Combatpersistence.authManager.isAuthenticated(player)) {
+            if (!Combatpersistence.authManager.isAuthenticated(player)) {
                 // Allow damage if they are supposed to die on join, even if not authenticated yet.
                 // This prevents them from being stuck invulnerable if the death processing is delayed.
                 if (Combatpersistence.tracker.isPendingDeath(player.getUUID())) {

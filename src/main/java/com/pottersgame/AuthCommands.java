@@ -9,10 +9,15 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.Permissions;
 
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class AuthCommands {
+
+    // Last /skin use per player, for the anti-API-spam cooldown. In-memory only.
+    private static final Map<UUID, Long> lastSkinUse = new ConcurrentHashMap<>();
 
     public static void register() {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
@@ -35,6 +40,18 @@ public class AuthCommands {
                     }
                     if (!pwd.equals(confirm)) {
                         player.sendSystemMessage(Component.literal(Combatpersistence.config.passwordMismatch));
+                        return 0;
+                    }
+                    if (pwd.length() < Combatpersistence.config.minPasswordLength) {
+                        player.sendSystemMessage(Component.literal(
+                            String.format(Combatpersistence.config.passwordTooShort, Combatpersistence.config.minPasswordLength)));
+                        return 0;
+                    }
+                    // BCrypt silently truncates past 72 bytes; refuse instead of
+                    // storing a hash of a truncated password.
+                    if (pwd.length() > Combatpersistence.config.maxPasswordLength) {
+                        player.sendSystemMessage(Component.literal(
+                            String.format(Combatpersistence.config.passwordTooLong, Combatpersistence.config.maxPasswordLength)));
                         return 0;
                     }
 
@@ -77,12 +94,20 @@ public class AuthCommands {
                                     SkinManager.applySkin(player, skin != null ? skin : player.getName().getString());
                                 }
                                 case LOCKED_OUT -> {
-                                    int secs = Combatpersistence.authManager.getLockoutSecondsRemaining(player.getUUID());
-                                    player.sendSystemMessage(Component.literal(
-                                        String.format(Combatpersistence.config.loginLockedOutMessage, secs)));
+                                    int secs = Combatpersistence.authManager.getLockoutSecondsRemaining(player);
+                                    Component msg = Component.literal(
+                                        String.format(Combatpersistence.config.loginLockedOutMessage, secs));
+                                    // Locked out means kicked: the join handler refuses the
+                                    // connection until the lockout expires.
+                                    player.connection.disconnect(msg);
                                 }
-                                case WRONG_PASSWORD ->
-                                    player.sendSystemMessage(Component.literal(Combatpersistence.config.incorrectPassword));
+                                case WRONG_PASSWORD -> {
+                                    if (Combatpersistence.config.kickOnWrongPassword) {
+                                        player.connection.disconnect(Component.literal(Combatpersistence.config.incorrectPassword));
+                                    } else {
+                                        player.sendSystemMessage(Component.literal(Combatpersistence.config.incorrectPassword));
+                                    }
+                                }
                             }
                         });
                     });
@@ -135,6 +160,17 @@ public class AuthCommands {
                         player.sendSystemMessage(Component.literal(Combatpersistence.config.authRequiredForSkin));
                         return 0;
                     }
+                    // Cooldown: each uncached lookup costs shared Mojang API quota.
+                    long cooldownMs = Combatpersistence.config.skinCommandCooldownSeconds * 1000L;
+                    long now = System.currentTimeMillis();
+                    Long lastUse = lastSkinUse.get(player.getUUID());
+                    if (lastUse != null && (now - lastUse) < cooldownMs) {
+                        int secs = (int) Math.ceil((cooldownMs - (now - lastUse)) / 1000.0);
+                        player.sendSystemMessage(Component.literal(
+                            String.format(Combatpersistence.config.skinCooldownMessage, secs)));
+                        return 0;
+                    }
+                    lastSkinUse.put(player.getUUID(), now);
                     String skinName = StringArgumentType.getString(context, "name");
                     Combatpersistence.authManager.setCustomSkin(player.getUUID(), skinName);
                     SkinManager.applySkin(player, skinName);

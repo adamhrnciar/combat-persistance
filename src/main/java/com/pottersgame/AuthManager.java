@@ -10,6 +10,7 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.effect.MobEffects;
@@ -26,11 +27,10 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class AuthManager {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -44,10 +44,6 @@ public class AuthManager {
     // Inventory stashed (and hidden from the client) while a player is not yet
     // authenticated. Stored as Base64-encoded compressed item NBT, keyed by UUID.
     private Map<UUID, List<String>> preAuthInventories = new ConcurrentHashMap<>();
-
-    private final ReentrantLock authSaveLock = new ReentrantLock();
-    private final ReentrantLock locSaveLock = new ReentrantLock();
-    private final ReentrantLock invSaveLock = new ReentrantLock();
 
     public AuthManager() {
         loadUsers();
@@ -68,6 +64,15 @@ public class AuthManager {
             this.lastIp = ip;
             this.lastLoginTime = System.currentTimeMillis();
         }
+
+        /** Snapshot copy so async serialization never races live mutation. */
+        UserData(UserData other) {
+            this.passwordHash = other.passwordHash;
+            this.username = other.username;
+            this.lastIp = other.lastIp;
+            this.lastLoginTime = other.lastLoginTime;
+            this.customSkin = other.customSkin;
+        }
     }
 
     /** Tracks consecutive failed /login attempts for brute-force lockout. In-memory only. */
@@ -76,9 +81,28 @@ public class AuthManager {
         long lockedUntil;
     }
 
+    // Lockout is tracked per account AND per source IP: the per-account counter
+    // stops brute-forcing one victim, the per-IP counter stops one host from
+    // spraying attempts across many accounts (or many offline-mode names).
     private final Map<UUID, LoginAttempts> loginAttempts = new ConcurrentHashMap<>();
+    private final Map<String, LoginAttempts> ipLoginAttempts = new ConcurrentHashMap<>();
 
     public enum LoginResult { SUCCESS, WRONG_PASSWORD, LOCKED_OUT }
+
+    /**
+     * Whether the password-auth flow applies on this server at all. Online-mode
+     * servers already have Mojang-verified identities, so password auth only
+     * guards offline-mode servers (where anyone can join under any name), and
+     * only while forceAuthInOfflineMode is enabled.
+     *
+     * Every auth check must go through this (via isAuthenticated) — gating only
+     * the join flow while other checks consult the raw authenticated set would
+     * leave players on online-mode servers permanently "unauthenticated".
+     */
+    public boolean authRequired(MinecraftServer server) {
+        if (!Combatpersistence.config.enableAuth) return false;
+        return !server.usesAuthentication() && Combatpersistence.config.forceAuthInOfflineMode;
+    }
 
     public boolean checkAutoLogin(ServerPlayer player) {
         // IP auto-login is opt-in; without it players re-enter their password each session.
@@ -123,7 +147,7 @@ public class AuthManager {
     }
 
     public boolean isAuthenticated(ServerPlayer player) {
-        if (!Combatpersistence.config.enableAuth) return true;
+        if (!authRequired(player.level().getServer())) return true;
         return authenticatedPlayers.contains(player.getUUID());
     }
 
@@ -137,17 +161,21 @@ public class AuthManager {
 
     public LoginResult login(ServerPlayer player, String password) {
         UUID uuid = player.getUUID();
+        String ip = getIp(player);
         long now = System.currentTimeMillis();
 
-        LoginAttempts att = loginAttempts.get(uuid);
-        if (att != null && att.lockedUntil > now) {
+        LoginAttempts accountAtt = loginAttempts.get(uuid);
+        LoginAttempts ipAtt = ipLoginAttempts.get(ip);
+        if ((accountAtt != null && accountAtt.lockedUntil > now)
+                || (ipAtt != null && ipAtt.lockedUntil > now)) {
             return LoginResult.LOCKED_OUT;
         }
 
         UserData data = users.get(uuid);
         if (data != null && BCrypt.checkpw(password, data.passwordHash)) {
             loginAttempts.remove(uuid);
-            data.lastIp = getIp(player);
+            ipLoginAttempts.remove(ip);
+            data.lastIp = ip;
             data.lastLoginTime = now;
             data.username = player.getName().getString(); // backfill/refresh for name-based admin lookups
             authenticatedPlayers.add(uuid);
@@ -156,24 +184,29 @@ public class AuthManager {
         }
 
         // Wrong password: record the failure and lock out once the limit is hit.
-        if (att == null) {
-            att = new LoginAttempts();
-            loginAttempts.put(uuid, att);
-        }
+        boolean locked = recordFailure(loginAttempts.computeIfAbsent(uuid, k -> new LoginAttempts()), now)
+                | recordFailure(ipLoginAttempts.computeIfAbsent(ip, k -> new LoginAttempts()), now);
+        return locked ? LoginResult.LOCKED_OUT : LoginResult.WRONG_PASSWORD;
+    }
+
+    private static boolean recordFailure(LoginAttempts att, long now) {
         att.count++;
         if (att.count >= Combatpersistence.config.maxLoginAttempts) {
             att.lockedUntil = now + Combatpersistence.config.loginLockoutSeconds * 1000L;
             att.count = 0;
-            return LoginResult.LOCKED_OUT;
+            return true;
         }
-        return LoginResult.WRONG_PASSWORD;
+        return false;
     }
 
-    /** Seconds remaining on a login lockout for this UUID, or 0 if not locked out. */
-    public int getLockoutSecondsRemaining(UUID uuid) {
-        LoginAttempts att = loginAttempts.get(uuid);
-        if (att == null) return 0;
-        long remaining = att.lockedUntil - System.currentTimeMillis();
+    /** Seconds remaining on a login lockout for this player (account or source IP), or 0 if not locked out. */
+    public int getLockoutSecondsRemaining(ServerPlayer player) {
+        long lockedUntil = 0;
+        LoginAttempts att = loginAttempts.get(player.getUUID());
+        if (att != null) lockedUntil = att.lockedUntil;
+        LoginAttempts ipAtt = ipLoginAttempts.get(getIp(player));
+        if (ipAtt != null) lockedUntil = Math.max(lockedUntil, ipAtt.lockedUntil);
+        long remaining = lockedUntil - System.currentTimeMillis();
         return remaining > 0 ? (int) Math.ceil(remaining / 1000.0) : 0;
     }
 
@@ -199,7 +232,7 @@ public class AuthManager {
         restorePreAuthInventory(player);
 
         // Then add back items that were moved to a combat-log NPC, if any.
-        CombatEvents.cleanUpNpc(player, Combatpersistence.tracker, ((ServerLevel) player.level()).getServer());
+        CombatEvents.cleanUpNpc(player, Combatpersistence.tracker, player.level().getServer());
 
         restoreLocation(player);
 
@@ -265,11 +298,11 @@ public class AuthManager {
             ServerLevel targetDim = currentLevel.getServer().getLevel(dimKey);
             if (targetDim != null) {
                 TeleportTransition transition = new TeleportTransition(
-                    targetDim, 
-                    new Vec3(loc.x, loc.y, loc.z), 
-                    Vec3.ZERO, 
-                    loc.yaw, 
-                    loc.pitch, 
+                    targetDim,
+                    new Vec3(loc.x, loc.y, loc.z),
+                    Vec3.ZERO,
+                    loc.yaw,
+                    loc.pitch,
                     TeleportTransition.DO_NOTHING
                 );
                 player.teleport(transition);
@@ -305,7 +338,7 @@ public class AuthManager {
             clearLiveInventory(player);
             return;
         }
-        if (!(player.level() instanceof ServerLevel world)) return;
+        ServerLevel world = player.level();
 
         List<String> encoded = new ArrayList<>();
         for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
@@ -323,7 +356,7 @@ public class AuthManager {
     public void restorePreAuthInventory(ServerPlayer player) {
         List<String> encoded = preAuthInventories.get(player.getUUID());
         if (encoded == null) return; // No stash (e.g. normal autologin) — leave live inventory untouched.
-        if (!(player.level() instanceof ServerLevel world)) return;
+        ServerLevel world = player.level();
 
         // A stash existing means the live inventory should have been emptied at
         // stash time. Anything present is a stale duplicate of the stash, so wipe
@@ -388,9 +421,21 @@ public class AuthManager {
     }
 
     private String getIp(ServerPlayer player) {
+        // InetSocketAddress handles IPv6 correctly; naive string splitting on ':'
+        // mangled IPv6 addresses into useless fragments.
+        if (player.connection.getRemoteAddress() instanceof InetSocketAddress inet && inet.getAddress() != null) {
+            return inet.getAddress().getHostAddress();
+        }
         String addr = player.connection.getRemoteAddress().toString();
         if (addr.startsWith("/")) addr = addr.substring(1);
         return addr.split(":")[0];
+    }
+
+    /** Synchronously flush all auth state to disk. Called on server shutdown. */
+    public void flush() {
+        saveUsers(false);
+        saveLocations(false);
+        saveInventories(false);
     }
 
     private void loadUsers() {
@@ -399,24 +444,29 @@ public class AuthManager {
                 Type type = new TypeToken<ConcurrentHashMap<UUID, UserData>>(){}.getType();
                 Map<UUID, UserData> loaded = GSON.fromJson(reader, type);
                 if (loaded != null) users = loaded;
-            } catch (IOException e) {
+            } catch (Exception e) {
                 Combatpersistence.LOGGER.error("Failed to load auth data", e);
             }
         }
     }
 
     private void saveUsers() {
-        Map<UUID, UserData> copy = new HashMap<>(users);
-        CompletableFuture.runAsync(() -> {
-            authSaveLock.lock();
+        saveUsers(true);
+    }
+
+    private void saveUsers(boolean async) {
+        // Deep copy: UserData objects are mutated on login, which could race the
+        // background serialization of a shallow snapshot.
+        Map<UUID, UserData> copy = new HashMap<>();
+        users.forEach((uuid, data) -> copy.put(uuid, new UserData(data)));
+        Runnable write = () -> {
             try (FileWriter writer = new FileWriter(AUTH_FILE)) {
                 GSON.toJson(copy, writer);
             } catch (IOException e) {
-                Combatpersistence.LOGGER.error("Failed to save auth data in background", e);
-            } finally {
-                authSaveLock.unlock();
+                Combatpersistence.LOGGER.error("Failed to save auth data", e);
             }
-        });
+        };
+        if (async) DiskIO.async(write); else DiskIO.sync(write);
     }
 
     private void loadLocations() {
@@ -425,24 +475,26 @@ public class AuthManager {
                 Type type = new TypeToken<ConcurrentHashMap<UUID, OriginalLocation>>(){}.getType();
                 Map<UUID, OriginalLocation> loaded = GSON.fromJson(reader, type);
                 if (loaded != null) preAuthLocations = loaded;
-            } catch (IOException e) {
+            } catch (Exception e) {
                 Combatpersistence.LOGGER.error("Failed to load pending locations", e);
             }
         }
     }
 
     private void saveLocations() {
+        saveLocations(true);
+    }
+
+    private void saveLocations(boolean async) {
         Map<UUID, OriginalLocation> copy = new HashMap<>(preAuthLocations);
-        CompletableFuture.runAsync(() -> {
-            locSaveLock.lock();
+        Runnable write = () -> {
             try (FileWriter writer = new FileWriter(LOC_FILE)) {
                 GSON.toJson(copy, writer);
             } catch (IOException e) {
-                Combatpersistence.LOGGER.error("Failed to save pending locations in background", e);
-            } finally {
-                locSaveLock.unlock();
+                Combatpersistence.LOGGER.error("Failed to save pending locations", e);
             }
-        });
+        };
+        if (async) DiskIO.async(write); else DiskIO.sync(write);
     }
 
     private void loadInventories() {
@@ -451,7 +503,7 @@ public class AuthManager {
                 Type type = new TypeToken<ConcurrentHashMap<UUID, List<String>>>(){}.getType();
                 Map<UUID, List<String>> loaded = GSON.fromJson(reader, type);
                 if (loaded != null) preAuthInventories = loaded;
-            } catch (IOException e) {
+            } catch (Exception e) {
                 Combatpersistence.LOGGER.error("Failed to load pending inventories", e);
             }
         }
@@ -459,20 +511,13 @@ public class AuthManager {
 
     private void saveInventories(boolean async) {
         Map<UUID, List<String>> copy = new HashMap<>(preAuthInventories);
-        Runnable action = () -> {
-            invSaveLock.lock();
+        Runnable write = () -> {
             try (FileWriter writer = new FileWriter(INV_FILE)) {
                 GSON.toJson(copy, writer);
             } catch (IOException e) {
                 Combatpersistence.LOGGER.error("Failed to save pending inventories", e);
-            } finally {
-                invSaveLock.unlock();
             }
         };
-        if (async) {
-            CompletableFuture.runAsync(action);
-        } else {
-            action.run();
-        }
+        if (async) DiskIO.async(write); else DiskIO.sync(write);
     }
 }

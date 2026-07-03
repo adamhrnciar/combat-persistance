@@ -15,9 +15,7 @@ import net.minecraft.world.item.ItemStack;
 import java.io.*;
 import java.lang.reflect.Type;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class CombatTracker {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -27,8 +25,6 @@ public class CombatTracker {
     private final Map<UUID, ActiveNPCData> activeNPCs = new ConcurrentHashMap<>();
     private Set<UUID> offlineDeaths = new HashSet<>();
     private final Set<UUID> pendingJoinDeaths = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    
-    private final ReentrantLock saveLock = new ReentrantLock();
 
     public CombatTracker() {
         loadData();
@@ -70,12 +66,15 @@ public class CombatTracker {
     }
 
     public Map<UUID, Long> getTaggedPlayers() {
-        return combatEndTimes;
+        return Collections.unmodifiableMap(combatEndTimes);
     }
 
     public void addNPC(UUID playerUuid, UUID npcUuid, List<ItemStack> inventory, ServerLevel world) {
         activeNPCs.put(playerUuid, new ActiveNPCData(playerUuid, npcUuid, inventory, world));
-        saveData();
+        // Synchronous: the caller clears the player's live inventory right after
+        // this, and vanilla then writes the emptied player.dat. If the server dies
+        // before this snapshot reaches the disk, the items exist nowhere.
+        saveData(false);
     }
 
     public UUID getNPCForPlayer(UUID playerUuid) {
@@ -130,13 +129,26 @@ public class CombatTracker {
 
     public void handleEntityDeath(Entity entity) {
         UUID entityUuid = entity.getUUID();
-        
+
+        if (entity instanceof ServerPlayer player) {
+            // A player's legitimate death ends their combat tag; without this, a
+            // player who dies, respawns and logs out inside the leftover tag
+            // window spawns a pointless NPC of their respawned self.
+            combatEndTimes.remove(player.getUUID());
+            return;
+        }
+
         if (entity instanceof CombatNPC npc) {
             List<ItemStack> inventory = npc.getStoredInventory();
             if (!inventory.isEmpty()) {
                 for (ItemStack stack : inventory) {
                     entity.spawnAtLocation((ServerLevel) entity.level(), stack);
                 }
+                // The death mixin injects at HEAD of LivingEntity.die — BEFORE
+                // vanilla's re-entry guard — so die() can run through here twice
+                // (e.g. /kill on a dying entity). Clear the list so a second pass
+                // can't drop the whole inventory again.
+                inventory.clear();
             } else {
                 for (ActiveNPCData data : activeNPCs.values()) {
                     if (data.npcUuid.equals(entityUuid)) {
@@ -187,9 +199,8 @@ public class CombatTracker {
         Set<UUID> deathsCopy = new HashSet<>(offlineDeaths);
         Set<UUID> pendingCopy = new HashSet<>(pendingJoinDeaths);
         Map<UUID, ActiveNPCData> npcsCopy = new HashMap<>(activeNPCs);
-        
+
         Runnable saveAction = () -> {
-            saveLock.lock();
             try (FileWriter writer = new FileWriter(DATA_FILE)) {
                 JsonObject root = new JsonObject();
                 root.add("offlineDeaths", GSON.toJsonTree(deathsCopy));
@@ -198,15 +209,13 @@ public class CombatTracker {
                 GSON.toJson(root, writer);
             } catch (IOException e) {
                 Combatpersistence.LOGGER.error("Failed to save combat data", e);
-            } finally {
-                saveLock.unlock();
             }
         };
 
         if (async) {
-            CompletableFuture.runAsync(saveAction);
+            DiskIO.async(saveAction);
         } else {
-            saveAction.run();
+            DiskIO.sync(saveAction);
         }
     }
 
@@ -238,7 +247,7 @@ public class CombatTracker {
         }
     }
 
-    public void tick(ServerLevel world) {
+    public void tick(net.minecraft.server.MinecraftServer server) {
         long now = System.currentTimeMillis();
 
         for (Iterator<Map.Entry<UUID, Long>> it = combatEndTimes.entrySet().iterator(); it.hasNext(); ) {
@@ -247,7 +256,7 @@ public class CombatTracker {
                 UUID playerUuid = entry.getKey();
                 ActiveNPCData npcData = activeNPCs.get(playerUuid);
                 if (npcData != null) {
-                    for (ServerLevel level : world.getServer().getAllLevels()) {
+                    for (ServerLevel level : server.getAllLevels()) {
                         Entity npc = level.getEntity(npcData.npcUuid);
                         if (npc != null) {
                             npc.discard();
@@ -261,28 +270,32 @@ public class CombatTracker {
     }
 
     public void restoreInventory(ServerPlayer player) {
-        ActiveNPCData data = activeNPCs.remove(player.getUUID());
+        ActiveNPCData data = activeNPCs.get(player.getUUID());
         if (data == null) return;
 
-        saveData();
-
-        if (player.level() instanceof ServerLevel world) {
-            for (String b64 : data.inventoryNbt) {
-                try {
-                    byte[] bytes = Base64.getDecoder().decode(b64);
-                    CompoundTag tag = NbtIo.readCompressed(new ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap());
-                    ItemStack.CODEC.parse(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), tag)
-                        .resultOrPartial(e -> Combatpersistence.LOGGER.error("Failed to decode restored item: {}", e))
-                        .ifPresent(stack -> {
-                             if (!player.getInventory().add(stack)) {
-                                 player.drop(stack, false);
-                             }
-                        });
-                } catch (Exception e) {
-                    Combatpersistence.LOGGER.error("Failed to parse restored inventory item from Base64", e);
-                }
+        ServerLevel world = player.level();
+        for (String b64 : data.inventoryNbt) {
+            try {
+                byte[] bytes = Base64.getDecoder().decode(b64);
+                CompoundTag tag = NbtIo.readCompressed(new ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap());
+                ItemStack.CODEC.parse(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), tag)
+                    .resultOrPartial(e -> Combatpersistence.LOGGER.error("Failed to decode restored item: {}", e))
+                    .ifPresent(stack -> {
+                         if (!player.getInventory().add(stack)) {
+                             player.drop(stack, false);
+                         }
+                    });
+            } catch (Exception e) {
+                Combatpersistence.LOGGER.error("Failed to parse restored inventory item from Base64", e);
             }
-            player.sendSystemMessage(net.minecraft.network.chat.Component.literal(Combatpersistence.config.inventoryRestoredMessage));
         }
+        player.sendSystemMessage(net.minecraft.network.chat.Component.literal(Combatpersistence.config.inventoryRestoredMessage));
+
+        // Only drop the tracker entry once the items are back in the live
+        // inventory, and persist that removal synchronously — same prefer-no-loss
+        // ordering as the pre-auth stash. Removing first meant a crash mid-restore
+        // destroyed the only durable copy of the items.
+        activeNPCs.remove(player.getUUID());
+        saveData(false);
     }
 }

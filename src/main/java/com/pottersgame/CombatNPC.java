@@ -1,10 +1,6 @@
 package com.pottersgame;
 
-import com.google.common.collect.HashMultimap;
 import com.mojang.authlib.GameProfile;
-import com.mojang.authlib.properties.Property;
-import com.mojang.authlib.properties.PropertyMap;
-import com.mojang.authlib.yggdrasil.ProfileResult;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -21,9 +17,7 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 
 public class CombatNPC extends Mannequin {
 
@@ -99,27 +93,7 @@ public class CombatNPC extends Mannequin {
                 if (skinProperty != null) {
                     server.execute(() -> {
                         if (!npc.isRemoved()) {
-                            // Get the existing GameProfile properties from the original player
-                            PropertyMap existingProperties = original.getGameProfile().properties();
-                            
-                            // Create a new mutable Multimap
-                            com.google.common.collect.Multimap<String, Property> properties = HashMultimap.create();
-                            
-                            // Copy existing properties to the new mutable multimap
-                            for (Map.Entry<String, Property> entry : existingProperties.entries()) {
-                                properties.put(entry.getKey(), entry.getValue());
-                            }
-                            
-                            // Add the new skin property
-                            properties.put("textures", skinProperty);
-                            
-                            // Wrap in a new PropertyMap
-                            PropertyMap updatedProperties = new PropertyMap(properties);
-                            
-                            // Create a new GameProfile with the updated properties
-                            GameProfile updatedProfile = new GameProfile(original.getUUID(), playerName, updatedProperties);
-                            
-                            // Set the ResolvableProfile component for the NPC
+                            GameProfile updatedProfile = SkinManager.withTextures(original.getGameProfile(), skinProperty);
                             npc.setComponent(DataComponents.PROFILE, ResolvableProfile.createResolved(updatedProfile));
                         }
                     });

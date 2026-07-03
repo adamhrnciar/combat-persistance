@@ -1,29 +1,26 @@
 package com.pottersgame;
 
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.properties.Property;
 import com.mojang.authlib.properties.PropertyMap;
-import net.minecraft.core.component.DataComponents;
+import com.pottersgame.mixin.PlayerAccessor;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundRespawnPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.level.portal.TeleportTransition;
-import net.minecraft.world.phys.Vec3;
 
 import java.io.InputStreamReader;
-import java.lang.reflect.Field;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -36,7 +33,12 @@ import java.util.regex.Pattern;
 
 public class SkinManager {
 
-    private static final Map<String, Property> skinCache = new ConcurrentHashMap<>();
+    /** Cached lookup result; {@code property == null} caches a failed lookup so bad names don't re-hit the API. */
+    private record CacheEntry(Property property, long fetchedAt) {}
+
+    private static final Map<String, CacheEntry> skinCache = new ConcurrentHashMap<>();
+    private static final long CACHE_TTL_MS = 6 * 60 * 60 * 1000L;      // successful lookups: 6 hours
+    private static final long NEGATIVE_TTL_MS = 10 * 60 * 1000L;       // failed lookups: 10 minutes
 
     // Mojang usernames: 1-16 chars, letters/digits/underscore only.
     private static final Pattern USERNAME_PATTERN = Pattern.compile("^[A-Za-z0-9_]{1,16}$");
@@ -57,16 +59,33 @@ public class SkinManager {
         }
     });
 
+    /** Copy of {@code base} with its textures property replaced. */
+    public static GameProfile withTextures(GameProfile base, Property texture) {
+        Multimap<String, Property> properties = HashMultimap.create();
+        for (Map.Entry<String, Property> entry : base.properties().entries()) {
+            properties.put(entry.getKey(), entry.getValue());
+        }
+        properties.removeAll("textures");
+        properties.put("textures", texture);
+        return new GameProfile(base.id(), base.name(), new PropertyMap(properties));
+    }
+
     /**
      * Fetches skin properties asynchronously from the Mojang API.
      * This bypasses the need for the server to be in online mode.
+     * The returned future completes with null when no skin could be resolved.
      */
     public static CompletableFuture<Property> fetchSkin(String identifier) {
         if (identifier == null) {
             return CompletableFuture.completedFuture(null);
         }
-        if (skinCache.containsKey(identifier)) {
-            return CompletableFuture.completedFuture(skinCache.get(identifier));
+        CacheEntry cached = skinCache.get(identifier);
+        if (cached != null) {
+            long ttl = cached.property() != null ? CACHE_TTL_MS : NEGATIVE_TTL_MS;
+            if (System.currentTimeMillis() - cached.fetchedAt() < ttl) {
+                return CompletableFuture.completedFuture(cached.property());
+            }
+            skinCache.remove(identifier, cached);
         }
 
         // Reject anything that isn't a plain Mojang username or UUID before it ever
@@ -79,113 +98,88 @@ public class SkinManager {
         }
 
         return CompletableFuture.supplyAsync(() -> {
-            try {
-                String uuid = identifier;
-
-                // 1. If identifier is a name, we must get the UUID first
-                if (looksLikeName && !looksLikeUuid) {
-                    URL nameUrl = URI.create("https://api.mojang.com/users/profiles/minecraft/" + identifier).toURL();
-                    HttpURLConnection nameConn = (HttpURLConnection) nameUrl.openConnection();
-                    nameConn.setRequestMethod("GET");
-                    nameConn.setConnectTimeout(5000);
-                    nameConn.setReadTimeout(5000);
-                    if (nameConn.getResponseCode() == 200) {
-                        JsonObject nameResp = JsonParser.parseReader(new InputStreamReader(nameConn.getInputStream())).getAsJsonObject();
-                        uuid = nameResp.get("id").getAsString();
-                    } else {
-                        return null; // Player not found or rate limited
-                    }
-                }
-
-                // The UUID returned by the name lookup is attacker-influenced data;
-                // re-validate it before building the second URL.
-                if (!UUID_PATTERN.matcher(uuid).matches()) {
-                    Combatpersistence.LOGGER.warn("Rejected skin lookup: resolved UUID is not valid for {}", identifier);
-                    return null;
-                }
-
-                // 2. Fetch the signed profile from Mojang sessionserver
-                URL url = URI.create("https://sessionserver.mojang.com/session/minecraft/profile/" + uuid + "?unsigned=false").toURL();
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-
-                if (conn.getResponseCode() == 200) {
-                    JsonObject response = JsonParser.parseReader(new InputStreamReader(conn.getInputStream())).getAsJsonObject();
-                    if (response.has("properties")) {
-                        JsonArray props = response.getAsJsonArray("properties");
-                        for (int i = 0; i < props.size(); i++) {
-                            JsonObject prop = props.get(i).getAsJsonObject();
-                            if (prop.get("name").getAsString().equals("textures")) {
-                                String value = prop.get("value").getAsString();
-                                String signature = prop.has("signature") ? prop.get("signature").getAsString() : "";
-                                Property property = new Property("textures", value, signature);
-                                skinCache.put(identifier, property);
-                                return property;
-                            }
-                        }
-                    }
-                } else if (conn.getResponseCode() == 429) {
-                    Combatpersistence.LOGGER.warn("Mojang API Rate Limit hit while fetching skin for {}", identifier);
-                }
-            } catch (Exception e) {
-                Combatpersistence.LOGGER.error("Failed to fetch skin {} from Mojang API", identifier, e);
-            }
-            return null;
+            Property property = lookupSkin(identifier, looksLikeName && !looksLikeUuid);
+            // Cache failures too (negative TTL) so a misspelled name can't be
+            // spammed into Mojang API rate-limit exhaustion.
+            skinCache.put(identifier, new CacheEntry(property, System.currentTimeMillis()));
+            return property;
         }, SKIN_EXECUTOR);
     }
 
-    private static MinecraftServer getServer(ServerPlayer player) {
+    private static Property lookupSkin(String identifier, boolean resolveNameFirst) {
         try {
-            Field serverField = ServerPlayer.class.getDeclaredField("server");
-            serverField.setAccessible(true);
-            return (MinecraftServer) serverField.get(player);
-        } catch (Exception e) {
-            if (player.level() instanceof ServerLevel sl) {
-                return sl.getServer();
+            String uuid = identifier;
+
+            // 1. If identifier is a name, we must get the UUID first
+            if (resolveNameFirst) {
+                JsonObject nameResp = getJson("https://api.mojang.com/users/profiles/minecraft/" + identifier, identifier);
+                if (nameResp == null) {
+                    return null; // Player not found or rate limited
+                }
+                uuid = nameResp.get("id").getAsString();
             }
+
+            // The UUID returned by the name lookup is attacker-influenced data;
+            // re-validate it before building the second URL.
+            if (!UUID_PATTERN.matcher(uuid).matches()) {
+                Combatpersistence.LOGGER.warn("Rejected skin lookup: resolved UUID is not valid for {}", identifier);
+                return null;
+            }
+
+            // 2. Fetch the signed profile from Mojang sessionserver
+            JsonObject response = getJson("https://sessionserver.mojang.com/session/minecraft/profile/" + uuid + "?unsigned=false", identifier);
+            if (response != null && response.has("properties")) {
+                JsonArray props = response.getAsJsonArray("properties");
+                for (int i = 0; i < props.size(); i++) {
+                    JsonObject prop = props.get(i).getAsJsonObject();
+                    if (prop.get("name").getAsString().equals("textures")) {
+                        String value = prop.get("value").getAsString();
+                        String signature = prop.has("signature") ? prop.get("signature").getAsString() : "";
+                        return new Property("textures", value, signature);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Combatpersistence.LOGGER.error("Failed to fetch skin {} from Mojang API", identifier, e);
         }
         return null;
     }
 
+    private static JsonObject getJson(String url, String identifier) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+        try {
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            int code = conn.getResponseCode();
+            if (code == 200) {
+                try (InputStreamReader reader = new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)) {
+                    return JsonParser.parseReader(reader).getAsJsonObject();
+                }
+            }
+            if (code == 429) {
+                Combatpersistence.LOGGER.warn("Mojang API Rate Limit hit while fetching skin for {}", identifier);
+            }
+            return null;
+        } finally {
+            conn.disconnect();
+        }
+    }
+
     public static void applySkin(ServerPlayer player, String skinName) {
-        MinecraftServer server = getServer(player);
-        if (server == null) return;
-        
+        MinecraftServer server = player.level().getServer();
+
         fetchSkin(skinName).thenAccept(skinProperty -> {
             if (skinProperty != null) {
                 server.execute(() -> {
-                    // Get the player's current GameProfile
-                    GameProfile oldProfile = player.getGameProfile();
-                    
-                    // Create a new mutable Multimap
-                    com.google.common.collect.Multimap<String, Property> properties = HashMultimap.create();
-                    
-                    // Copy existing properties from the old GameProfile
-                    for (Map.Entry<String, Property> entry : oldProfile.properties().entries()) {
-                        properties.put(entry.getKey(), entry.getValue());
-                    }
-                    
-                    // Remove existing "textures" properties and add the new one
-                    properties.removeAll("textures");
-                    properties.put("textures", skinProperty);
-                    
-                    // Wrap the final multimap in an immutable PropertyMap
-                    PropertyMap updatedProperties = new PropertyMap(properties);
-                    
-                    // Create a new GameProfile record
-                    GameProfile newProfile = new GameProfile(oldProfile.id(), oldProfile.name(), updatedProperties);
-                    
-                    // Replace the GameProfile in the Player object using reflection
-                    try {
-                        Field profileField = Player.class.getDeclaredField("gameProfile");
-                        profileField.setAccessible(true);
-                        profileField.set(player, newProfile);
-                    } catch (Exception e) {
-                        Combatpersistence.LOGGER.error("Failed to swap GameProfile via reflection", e);
-                    }
-                    
+                    if (player.isRemoved() || player.connection == null) return;
+
+                    GameProfile newProfile = withTextures(player.getGameProfile(), skinProperty);
+
+                    // Swap the profile through the accessor mixin — reflection by
+                    // field name only worked in dev, where fields aren't remapped.
+                    ((PlayerAccessor) player).combatpersistence$setGameProfile(newProfile);
+
                     // Refresh player for everyone
                     refreshPlayer(player);
                     Combatpersistence.LOGGER.info("Applied skin {} to player {}", skinName, player.getName().getString());
@@ -195,7 +189,7 @@ public class SkinManager {
     }
 
     private static void refreshPlayer(ServerPlayer player) {
-        if (!(player.level() instanceof ServerLevel world)) return;
+        ServerLevel world = player.level();
         MinecraftServer server = world.getServer();
 
         // Refresh the tab-list entry (which carries the skin) for everyone.

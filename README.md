@@ -8,12 +8,12 @@ Combat Persistence is a server-side Fabric mod for Minecraft that prevents comba
 *   **Persistent NPCs**: When a tagged player disconnects, a Mannequin NPC spawns at their location.
     *   **Anti-Dupe**: Clears the player's inventory and cursor stack on logout to prevent duplication exploits.
     *   **Visual Mirroring**: NPCs mirror the player's skin, armor, and held items.
-    *   **Persistence**: NPCs store player UUIDs in NBT, surviving chunk unloads and server restarts.
+    *   **Persistence**: The player's inventory is persisted to disk the moment the NPC spawns, surviving chunk unloads, server restarts, and crashes. (The NPC *entity* is intentionally never written to chunk data — if it despawns with the world, the items are still restored to the player on their next join.)
 *   **Offline Death**: If the NPC is killed, the player's items drop and they will die upon rejoining the server.
 *   **Authentication System**:
     *   **BCrypt Hashing**: Passwords are hashed, never stored in plaintext.
     *   **Session Autologin**: Remembers a session for a configurable window (default 24 hours). Optional IP-based autologin is **off by default** (weak behind shared NAT/proxies).
-    *   **Brute-Force Lockout**: Locks an account after too many failed `/login` attempts.
+    *   **Brute-Force Lockout**: A wrong `/login` password kicks the player; after too many failed attempts the account — and the attacking IP — is locked and refused at join until the lockout expires.
     *   **Inventory Protection**: Hides a player's inventory and coordinates until they enter their password, so an impostor sharing their offline UUID cannot view their items.
     *   **Operator Reset**: `/authreset <player>` lets staff wipe a forgotten or compromised account.
     *   **Lobby Support**: Teleports unauthenticated players to a safe lobby dimension.
@@ -34,7 +34,8 @@ The configuration file is located at `config/combatpersistence.json`.
 | `combatMessage` | `§c§lIN COMBAT: §f%s s remaining` | The action bar message shown to tagged players. Use `%s` for time remaining. |
 | `npcDeathBroadcast` | `§c[PvP] §7%s combat logged and was slain!` | The message broadcast when an NPC is killed. |
 | `inventoryRestoredMessage` | `§aYour inventory has been restored.` | Message sent when a player's inventory is restored. |
-| `blockedCommands` | `[...]` | List of commands disabled during combat (e.g., /spawn, /home). |
+| `blockedCommands` | `[...]` | List of commands disabled during combat (e.g., /spawn, /home). Namespaced forms like `/minecraft:tp` are blocked automatically; command *aliases* (e.g. `/teleport` for `/tp`) need their own entry. |
+| `commandBlockedInCombatMessage` | `§cYou cannot use this command while in combat!` | Message shown when a blocked command is used in combat. |
 
 ### Arena / SMP Settings
 | Setting | Default | Description |
@@ -45,12 +46,16 @@ The configuration file is located at `config/combatpersistence.json`.
 ### Authentication Settings
 | Setting | Default | Description |
 | :--- | :--- | :--- |
-| `enableAuth` | `true` | Enables the built-in authentication system. |
-| `forceAuthInOfflineMode` | `true` | Requires authentication even if the server is in offline mode. |
+| `enableAuth` | `true` | Enables the built-in authentication system. Auth only ever applies to **offline-mode** servers — online-mode servers already have Mojang-verified identities, so players there are never asked to register or log in. |
+| `forceAuthInOfflineMode` | `true` | Requires authentication when the server is in offline mode. Set to `false` to opt an offline-mode server out of password auth entirely. |
 | `enableIpAutoLogin` | `false` | Optional IP-based autologin. Off by default (weak behind shared NAT/proxies). |
 | `sessionDurationHours` | 24 | How long an autologin session lasts for standard players. |
-| `maxLoginAttempts` | 5 | Failed `/login` attempts before lockout. |
-| `loginLockoutSeconds` | 300 | Lockout duration after too many failed attempts. |
+| `maxLoginAttempts` | 5 | Failed `/login` attempts before lockout (tracked per account and per source IP). |
+| `loginLockoutSeconds` | 300 | Lockout duration after too many failed attempts. While locked out, the player is refused at join. |
+| `kickOnWrongPassword` | `true` | Kick the player immediately on a wrong `/login` password. |
+| `minPasswordLength` | 4 | Minimum password length accepted by `/register`. |
+| `maxPasswordLength` | 64 | Maximum password length (BCrypt truncates beyond 72 bytes, so long passwords are refused rather than silently cut). |
+| `skinCommandCooldownSeconds` | 30 | Cooldown between `/skin` uses, protecting the server's shared Mojang API rate limit. |
 | `hideInventoryBeforeAuth` | `true` | Conceals the player's inventory until they log in. |
 | `hideCoordinatesBeforeAuth`| `true` | Conceals the player's location from unauthenticated users. |
 | `authTimeoutSeconds` | 60 | Time in seconds before an unauthenticated player is kicked. |
@@ -83,7 +88,8 @@ This mod addresses several common vulnerabilities:
 *   **Cursor Stack Dupe**: Prevents item duplication via cursor holding during logout.
 *   **Ghost Inventory**: Ensures inventory state is cleared before the player fully disconnects.
 *   **Spoofing Protection**: Uses session secrets rather than just IP-based autologin.
-*   **Thread Safety**: Uses `ReentrantLock` and background saving to prevent data corruption.
+*   **Signed-Command Bypass**: Auth and combat command blocking cover both the plain and the signed chat-command packet paths.
+*   **Thread Safety**: All data files are written through a single serialized writer thread, so concurrent saves can never overwrite newer data with a stale snapshot; critical snapshots (inventories) are flushed synchronously before the live copy is destroyed.
 
 ## Support
 

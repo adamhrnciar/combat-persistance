@@ -8,20 +8,18 @@ import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
-import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
-import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
+import net.minecraft.world.inventory.ResultContainer;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.inventory.TransientCraftingContainer;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
@@ -29,17 +27,17 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class CombatEvents {
-    
+
     private static final Map<UUID, Long> joinTimes = new ConcurrentHashMap<>();
 
     public static void register(CombatTracker tracker, CombatConfig config) {
-        
+
         ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
             if (entity instanceof ServerPlayer victim) {
                 if (!Combatpersistence.authManager.isAuthenticated(victim)) return false;
 
                 Entity attackerEntity = source.getEntity();
-                
+
                 // Only tag on player-vs-player damage (no PvE/environmental tagging)
                 if (attackerEntity instanceof ServerPlayer attacker && Combatpersistence.authManager.isAuthenticated(attacker)) {
                     if (victim != attacker && !victim.getAbilities().instabuild && !attacker.getAbilities().instabuild) {
@@ -55,10 +53,10 @@ public class CombatEvents {
                         tracker.tag(attacker, config.combatTagDurationSeconds);
                     }
                 } else if (attackerEntity instanceof ServerPlayer) {
-                    return false; 
+                    return false;
                 }
             }
-            return true; 
+            return true;
         });
 
         UseEntityCallback.EVENT.register((player, world, hand, entity, hitResult) -> {
@@ -119,7 +117,7 @@ public class CombatEvents {
             UUID uuid = player.getUUID();
             boolean authenticated = Combatpersistence.authManager.isAuthenticated(player);
             boolean inCombat = tracker.isInCombat(player);
-            
+
             Combatpersistence.LOGGER.info("Player {} disconnected. Auth: {}, InCombat: {}", player.getName().getString(), authenticated, inCombat);
 
             if (authenticated && inCombat) {
@@ -129,16 +127,20 @@ public class CombatEvents {
                 for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
                     fullInv.add(player.getInventory().getItem(i).copy());
                 }
-                
+
                 // CRITICAL: Include the item currently held by the cursor (ScreenHandler stack)
                 ItemStack cursorStack = player.containerMenu.getCarried().copy();
                 if (!cursorStack.isEmpty()) {
                     fullInv.add(cursorStack);
                 }
 
-                // CRITICAL FIX: Include items in crafting grids or other temporary slots
+                // Sweep items sitting in TRANSIENT slots (crafting grids and their
+                // result slot), which vanilla would otherwise drop on the ground.
+                // Only transient containers: matching every non-player-inventory
+                // slot would also empty an open chest/barrel into the NPC —
+                // stealing the container's contents.
                 for (Slot slot : player.containerMenu.slots) {
-                    if (slot.container != player.getInventory()) {
+                    if (slot.container instanceof TransientCraftingContainer || slot.container instanceof ResultContainer) {
                         ItemStack stack = slot.getItem();
                         if (!stack.isEmpty()) {
                             fullInv.add(stack.copy());
@@ -148,7 +150,7 @@ public class CombatEvents {
                 }
 
                 CombatNPC npc = CombatNPC.spawn(player, fullInv);
-                
+
                 if (npc != null) {
                     Combatpersistence.LOGGER.info("Successfully initiated CombatNPC for {}. NPC UUID: {}", player.getName().getString(), npc.getUUID());
                 } else {
@@ -168,15 +170,28 @@ public class CombatEvents {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayer player = handler.getPlayer();
             UUID uuid = player.getUUID();
+
+            // A live login lockout (account or source IP) refuses the connection
+            // outright — checked before any other join processing so a locked-out
+            // player can't even reach the lobby to retry.
+            if (Combatpersistence.authManager.authRequired(server)) {
+                int lockoutSecs = Combatpersistence.authManager.getLockoutSecondsRemaining(player);
+                if (lockoutSecs > 0) {
+                    player.connection.disconnect(Component.literal(
+                        String.format(config.loginLockedOutMessage, lockoutSecs)));
+                    return;
+                }
+            }
+
             joinTimes.put(uuid, System.currentTimeMillis());
-            
+
             boolean wasOfflineKilled = tracker.checkAndClearOfflineDeath(uuid);
             if (wasOfflineKilled) {
                 player.getInventory().clearContent();
                 // tracker.markOfflineDeath already adds to tracker's pending deaths
             }
 
-            if (config.enableAuth && (!server.usesAuthentication() || !config.forceAuthInOfflineMode)) {
+            if (Combatpersistence.authManager.authRequired(server)) {
                 if (Combatpersistence.authManager.checkAutoLogin(player)) {
                     player.sendSystemMessage(Component.literal("§aWelcome back! Autologin session verified."));
 
@@ -199,19 +214,9 @@ public class CombatEvents {
 
                     if (config.hideCoordinatesBeforeAuth) {
                         Combatpersistence.authManager.saveLocation(player);
-                        ResourceKey<Level> dimKey = ResourceKey.create(Registries.DIMENSION, Identifier.parse(config.lobbyDimension));
-                        ServerLevel lobbyLevel = server.getLevel(dimKey);
-                        if (lobbyLevel != null) {
-                            TeleportTransition transition = new TeleportTransition(
-                                lobbyLevel, 
-                                new Vec3(config.lobbyX, config.lobbyY, config.lobbyZ), 
-                                Vec3.ZERO, 0, 0, 
-                                TeleportTransition.DO_NOTHING
-                            );
-                            player.teleport(transition);
-                        }
+                        teleportToLobby(server, player, config);
                     }
-                    
+
                     if (Combatpersistence.authManager.isRegistered(uuid)) {
                         player.sendSystemMessage(Component.literal(config.loginPrompt));
                     } else {
@@ -219,9 +224,12 @@ public class CombatEvents {
                     }
                 }
             } else {
-                // Auth is off (or this is an online-mode server). Recover any inventory
-                // that was stashed while auth was still enabled, so disabling auth can
-                // never strand a player's items in the pending-inventory file.
+                // Auth doesn't apply (disabled, or this is an online-mode server).
+                // Recover any state left behind from when auth WAS active, so turning
+                // auth off can never strand a player's items in the pending-inventory
+                // file or leave them floating and invulnerable from a pre-auth join.
+                player.setNoGravity(false);
+                player.setInvulnerable(false);
                 Combatpersistence.authManager.restorePreAuthInventory(player);
                 cleanUpNpc(player, tracker, server);
                 // If no auth, handle pending death immediately
@@ -240,9 +248,11 @@ public class CombatEvents {
 
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 UUID uuid = player.getUUID();
-                boolean authenticated = Combatpersistence.authManager.isAuthenticated(player);
 
-                if (config.enableAuth && !authenticated) {
+                // isAuthenticated is true whenever the auth flow doesn't apply
+                // (auth disabled, online-mode server), so this only ever gates
+                // players actually stuck in the login window.
+                if (!Combatpersistence.authManager.isAuthenticated(player)) {
                     Long joinTime = joinTimes.get(uuid);
                     if (joinTime != null && (now - joinTime) > (config.authTimeoutSeconds * 1000L)) {
                         player.connection.disconnect(Component.literal(config.loginTimeoutMessage));
@@ -251,36 +261,20 @@ public class CombatEvents {
 
                     // CRITICAL FIX: Ender Pearl Lobby Escape - continuously lock to lobby and clear pearls
                     if (config.hideCoordinatesBeforeAuth) {
-                        ResourceKey<Level> dimKey = ResourceKey.create(Registries.DIMENSION, Identifier.parse(config.lobbyDimension));
-                        if (!player.level().dimension().equals(dimKey)) {
-                            ServerLevel lobbyLevel = server.getLevel(dimKey);
-                            if (lobbyLevel != null) {
-                                TeleportTransition transition = new TeleportTransition(
-                                    lobbyLevel, 
-                                    new Vec3(config.lobbyX, config.lobbyY, config.lobbyZ), 
-                                    Vec3.ZERO, 0, 0, 
-                                    TeleportTransition.DO_NOTHING
-                                );
-                                player.teleport(transition);
-                            }
-                        } else if (player.distanceToSqr(config.lobbyX, config.lobbyY, config.lobbyZ) > 100) {
-                            TeleportTransition transition = new TeleportTransition(
-                                (ServerLevel) player.level(), 
-                                new Vec3(config.lobbyX, config.lobbyY, config.lobbyZ), 
-                                Vec3.ZERO, 0, 0, 
-                                TeleportTransition.DO_NOTHING
-                            );
-                            player.teleport(transition);
+                        if (!player.level().dimension().equals(config.lobbyDimensionKey())
+                                || player.distanceToSqr(config.lobbyX, config.lobbyY, config.lobbyZ) > 100) {
+                            teleportToLobby(server, player, config);
                         }
                     }
 
-                    // Clear any thrown ender pearls to prevent teleportation exploits
+                    // Clear any thrown ender pearls to prevent teleportation exploits.
+                    // Iterate a copy: discarding a pearl deregisters it from the
+                    // player's live set, which would throw CME mid-iteration.
                     Set<ThrownEnderpearl> pearls = player.getEnderPearls();
                     if (!pearls.isEmpty()) {
-                        for (ThrownEnderpearl pearl : pearls) {
+                        for (ThrownEnderpearl pearl : List.copyOf(pearls)) {
                             pearl.discard();
                         }
-                        pearls.clear();
                     }
 
                     if (server.getTickCount() % 100 == 0) {
@@ -292,16 +286,16 @@ public class CombatEvents {
                     }
                 }
             }
-        });
 
-        ServerTickEvents.END_LEVEL_TICK.register(world -> {
-            tracker.tick(world);
+            // Combat tag expiry + NPC discard, once per tick (this used to run per
+            // level, i.e. three times per tick on a vanilla server).
+            tracker.tick(server);
+
             Map<UUID, Long> tagged = tracker.getTaggedPlayers();
             if (!tagged.isEmpty()) {
-                long now = System.currentTimeMillis();
                 for (Map.Entry<UUID, Long> entry : tagged.entrySet()) {
-                    ServerPlayer player = (ServerPlayer) world.getPlayerInAnyDimension(entry.getKey());
-                    if (player != null && player.level() == world) {
+                    ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+                    if (player != null) {
                         long remainingMillis = Math.max(0, entry.getValue() - now);
                         if (remainingMillis > 0) {
                             int seconds = (int) Math.ceil(remainingMillis / 1000.0);
@@ -314,6 +308,17 @@ public class CombatEvents {
         });
     }
 
+    private static void teleportToLobby(MinecraftServer server, ServerPlayer player, CombatConfig config) {
+        ServerLevel lobbyLevel = server.getLevel(config.lobbyDimensionKey());
+        if (lobbyLevel == null) return;
+        player.teleport(new TeleportTransition(
+            lobbyLevel,
+            new Vec3(config.lobbyX, config.lobbyY, config.lobbyZ),
+            Vec3.ZERO, 0, 0,
+            TeleportTransition.DO_NOTHING
+        ));
+    }
+
     public static void handlePendingDeath(ServerPlayer player) {
         if (Combatpersistence.tracker.isPendingDeath(player.getUUID())) {
             player.getInventory().clearContent();
@@ -323,7 +328,7 @@ public class CombatEvents {
         }
     }
 
-    public static void cleanUpNpc(ServerPlayer player, CombatTracker tracker, net.minecraft.server.MinecraftServer server) {
+    public static void cleanUpNpc(ServerPlayer player, CombatTracker tracker, MinecraftServer server) {
         // Discard entity if it exists
         UUID npcUuid = tracker.getNPCForPlayer(player.getUUID());
         if (npcUuid != null) {
