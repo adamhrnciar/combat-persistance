@@ -48,5 +48,5 @@ replay_*.log
 .claude/*
 !.claude/skills/
 GEMINI.md
-CLAUDE.md
+# CLAUDE.md is versioned so CI agents and clones get it
 gha-creds-*.json
