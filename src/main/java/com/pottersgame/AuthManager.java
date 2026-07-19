@@ -4,10 +4,6 @@ import com.google.gson.*;
 import com.google.gson.reflect.TypeToken;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.NbtAccounter;
-import net.minecraft.nbt.NbtIo;
-import net.minecraft.nbt.NbtOps;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -20,8 +16,6 @@ import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 import org.mindrot.jbcrypt.BCrypt;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
@@ -42,8 +36,9 @@ public class AuthManager {
     private final Set<UUID> authenticatedPlayers = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private Map<UUID, OriginalLocation> preAuthLocations = new ConcurrentHashMap<>();
     // Inventory stashed (and hidden from the client) while a player is not yet
-    // authenticated. Stored as Base64-encoded compressed item NBT, keyed by UUID.
-    private Map<UUID, List<String>> preAuthInventories = new ConcurrentHashMap<>();
+    // authenticated. Stored as slot + Base64-encoded compressed item NBT,
+    // keyed by UUID, so armor/offhand go back to their equipment slots.
+    private Map<UUID, List<SlottedInventory.SlotItem>> preAuthInventories = new ConcurrentHashMap<>();
 
     public AuthManager() {
         loadUsers();
@@ -340,66 +335,47 @@ public class AuthManager {
         }
         ServerLevel world = player.level();
 
-        List<String> encoded = new ArrayList<>();
-        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
-            encodeStack(player.getInventory().getItem(i), world, encoded);
-        }
-        // Include the cursor/carried stack so an open-screen carry isn't lost.
-        encodeStack(player.containerMenu.getCarried(), world, encoded);
+        // Slot-aware snapshot: main storage with indices, armor/offhand via the
+        // high container indices, cursor/crafting as slotless extras.
+        List<SlottedInventory.SlotItem> encoded =
+            SlottedInventory.encodeAll(world, SlottedInventory.snapshot(player));
 
         preAuthInventories.put(uuid, encoded);
         // Synchronous: durably persist the stash BEFORE destroying the live copy.
         saveInventories(false);
         clearLiveInventory(player);
+        Combatpersistence.debug("Stashed pre-auth inventory of {} ({} items)", player.getName().getString(), encoded.size());
     }
 
     public void restorePreAuthInventory(ServerPlayer player) {
-        List<String> encoded = preAuthInventories.get(player.getUUID());
+        List<SlottedInventory.SlotItem> encoded = preAuthInventories.get(player.getUUID());
         if (encoded == null) return; // No stash (e.g. normal autologin) — leave live inventory untouched.
         ServerLevel world = player.level();
 
-        // A stash existing means the live inventory should have been emptied at
-        // stash time. Anything present is a stale duplicate of the stash, so wipe
-        // it before restoring to guarantee a single copy.
-        clearLiveInventory(player);
+        SlottedInventory.DecodeResult decoded = SlottedInventory.decodeAll(world, encoded);
 
-        for (String b64 : encoded) {
-            try {
-                byte[] bytes = Base64.getDecoder().decode(b64);
-                CompoundTag tag = NbtIo.readCompressed(new ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap());
-                ItemStack.CODEC.parse(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), tag)
-                    .resultOrPartial(e -> Combatpersistence.LOGGER.error("Failed to decode stashed item: {}", e))
-                    .ifPresent(stack -> {
-                        if (!player.getInventory().add(stack)) {
-                            player.drop(stack, false);
-                        }
-                    });
-            } catch (Exception e) {
-                Combatpersistence.LOGGER.error("Failed to restore pre-auth inventory item", e);
-            }
+        // A stash existing means the live inventory should have been emptied at
+        // stash time — anything present now is a stale duplicate, so wipe it to
+        // guarantee a single copy. But only when every stashed item decoded: on
+        // a partial failure restore additively instead (prefer dupe over loss).
+        boolean clearFirst = decoded.failures() == 0;
+        if (!clearFirst) {
+            Combatpersistence.LOGGER.warn(
+                "{} of {} stashed items failed to decode for {} — restoring additively, live inventory NOT cleared (prefer dupe over loss)",
+                decoded.failures(), encoded.size(), player.getName().getString());
         }
+
+        SlottedInventory.PlaceResult result = SlottedInventory.place(player, decoded.items(), clearFirst);
+        Combatpersistence.debug(
+            "Restored pre-auth inventory for {}: {} items ({} exact slot of which {} equipment, {} loose, {} dropped), clearedFirst={}",
+            player.getName().getString(), decoded.items().size(),
+            result.exact(), result.equipped(), result.loose(), result.dropped(), clearFirst);
 
         // Only now that the items are safely back in the live inventory do we drop
         // the stash, and persist that removal synchronously so a crash can't leave
         // a stash behind to be restored a second time (dupe).
         preAuthInventories.remove(player.getUUID());
         saveInventories(false);
-
-        player.containerMenu.sendAllDataToRemote();
-    }
-
-    private static void encodeStack(ItemStack stack, ServerLevel world, List<String> out) {
-        if (stack == null || stack.isEmpty()) return;
-        try {
-            CompoundTag tag = (CompoundTag) ItemStack.CODEC
-                .encodeStart(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), stack)
-                .getOrThrow(e -> new RuntimeException("Failed to encode item: " + e));
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            NbtIo.writeCompressed(tag, baos);
-            out.add(Base64.getEncoder().encodeToString(baos.toByteArray()));
-        } catch (Exception e) {
-            Combatpersistence.LOGGER.error("Failed to stash pre-auth inventory item", e);
-        }
     }
 
     private static void clearLiveInventory(ServerPlayer player) {
@@ -500,9 +476,37 @@ public class AuthManager {
     private void loadInventories() {
         if (INV_FILE.exists()) {
             try (FileReader reader = new FileReader(INV_FILE)) {
-                Type type = new TypeToken<ConcurrentHashMap<UUID, List<String>>>(){}.getType();
-                Map<UUID, List<String>> loaded = GSON.fromJson(reader, type);
-                if (loaded != null) preAuthInventories = loaded;
+                JsonElement root = JsonParser.parseReader(reader);
+                if (root.isJsonObject() && root.getAsJsonObject().has("inventories")) {
+                    // v2: {"formatVersion": 2, "inventories": {uuid: [{"slot": n, "nbt": "..."}]}}
+                    Type type = new TypeToken<ConcurrentHashMap<UUID, List<SlottedInventory.SlotItem>>>(){}.getType();
+                    Map<UUID, List<SlottedInventory.SlotItem>> loaded =
+                        GSON.fromJson(root.getAsJsonObject().get("inventories"), type);
+                    if (loaded != null) preAuthInventories = loaded;
+                } else {
+                    // Legacy pre-slot format: bare {uuid: ["b64", ...]} map. Convert in
+                    // memory to slotless entries; the next save writes the v2 format.
+                    Type type = new TypeToken<ConcurrentHashMap<UUID, List<String>>>(){}.getType();
+                    Map<UUID, List<String>> legacy = GSON.fromJson(root, type);
+                    if (legacy != null) {
+                        Map<UUID, List<SlottedInventory.SlotItem>> converted = new ConcurrentHashMap<>();
+                        legacy.forEach((uuid, list) -> {
+                            List<SlottedInventory.SlotItem> items = new ArrayList<>();
+                            if (list != null) {
+                                for (String b64 : list) {
+                                    items.add(new SlottedInventory.SlotItem(SlottedInventory.NO_SLOT, b64));
+                                }
+                            }
+                            converted.put(uuid, items);
+                        });
+                        preAuthInventories = converted;
+                        if (!converted.isEmpty()) {
+                            Combatpersistence.LOGGER.info(
+                                "Migrated {} legacy pre-auth inventory stash(es) to the slotted format (restored slotless)",
+                                converted.size());
+                        }
+                    }
+                }
             } catch (Exception e) {
                 Combatpersistence.LOGGER.error("Failed to load pending inventories", e);
             }
@@ -510,10 +514,13 @@ public class AuthManager {
     }
 
     private void saveInventories(boolean async) {
-        Map<UUID, List<String>> copy = new HashMap<>(preAuthInventories);
+        Map<UUID, List<SlottedInventory.SlotItem>> copy = new HashMap<>(preAuthInventories);
         Runnable write = () -> {
             try (FileWriter writer = new FileWriter(INV_FILE)) {
-                GSON.toJson(copy, writer);
+                JsonObject root = new JsonObject();
+                root.addProperty("formatVersion", 2);
+                root.add("inventories", GSON.toJsonTree(copy));
+                GSON.toJson(root, writer);
             } catch (IOException e) {
                 Combatpersistence.LOGGER.error("Failed to save pending inventories", e);
             }

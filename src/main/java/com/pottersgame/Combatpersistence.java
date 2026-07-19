@@ -13,6 +13,20 @@ public class Combatpersistence implements ModInitializer {
     public static final CombatTracker tracker = new CombatTracker();
     public static final AuthManager authManager = new AuthManager();
 
+    /**
+     * Verbose diagnostics gated on config.debugLogging, emitted at INFO so a
+     * production server can enable them with a config edit instead of a log4j
+     * override. Null-safe because tracker/authManager (and their data loads)
+     * initialize before the config is assigned in onInitialize. Errors and
+     * warnings never go through here — they always log unconditionally.
+     */
+    public static void debug(String message, Object... args) {
+        CombatConfig c = config;
+        if (c != null && c.debugLogging) {
+            LOGGER.info(message, args);
+        }
+    }
+
     @Override
     public void onInitialize() {
         LOGGER.info("Initializing Combat Persistence Mod...");

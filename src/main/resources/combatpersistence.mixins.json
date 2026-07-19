@@ -7,7 +7,8 @@
 		"CombatDeathMixin",
 		"CombatPickupMixin",
 		"EnderChestBlockMixin",
-		"PlayerAccessor"
+		"PlayerAccessor",
+		"PlayerListRemoveMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

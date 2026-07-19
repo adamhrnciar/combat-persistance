@@ -73,13 +73,16 @@ public class CombatNPC extends Mannequin {
         return storedInventory;
     }
 
-    public static CombatNPC spawn(ServerPlayer original, List<ItemStack> inventory) {
+    public static CombatNPC spawn(ServerPlayer original, List<SlottedInventory.SlottedStack> inventory) {
         ServerLevel world = (ServerLevel) original.level();
         MinecraftServer server = world.getServer();
         CombatConfig config = Combatpersistence.config;
 
         String playerName = original.getName().getString();
-        CombatNPC npc = new CombatNPC(world, original.getUUID(), playerName, inventory);
+        // The NPC itself only ever drops the items on death, so it keeps the
+        // bare stacks; the slot indices live in the tracker entry for restore.
+        List<ItemStack> bareStacks = inventory.stream().map(SlottedInventory.SlottedStack::stack).toList();
+        CombatNPC npc = new CombatNPC(world, original.getUUID(), playerName, bareStacks);
 
         // Visual setup
         GameProfile currentProfile = original.getGameProfile();

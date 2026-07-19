@@ -25,6 +25,9 @@ public class CombatConfig {
     public boolean playSpawnSound = true;
     public String combatMessage = "§c§lIN COMBAT: §f%s s remaining";
     public String npcDeathBroadcast = "§c[PvP] §7%s combat logged and was slain!";
+    // Verbose INFO-level diagnostics for combat-log snapshots, restores and NPC
+    // lifecycle — for debugging on production servers. Errors always log.
+    public boolean debugLogging = false;
     public String inventoryRestoredMessage = "§aYour inventory has been restored.";
     public String commandBlockedInCombatMessage = "§cYou cannot use this command while in combat!";
     public String loginTimeoutMessage = "§cLogin timeout!";

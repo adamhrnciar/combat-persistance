@@ -3,10 +3,6 @@ package com.pottersgame;
 import com.google.gson.*;
 import com.google.gson.reflect.TypeToken;
 import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.NbtIo;
-import net.minecraft.nbt.NbtOps;
-import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -33,26 +29,17 @@ public class CombatTracker {
     public static class ActiveNPCData {
         public UUID playerUuid;
         public UUID npcUuid;
-        public List<String> inventoryNbt; // Base64 encoded NBT
+        /** Items with the container slot they came from (NO_SLOT for cursor/crafting). */
+        public List<SlottedInventory.SlotItem> items;
+        /** Legacy pre-slot format (flat Base64 list). Only ever non-null right
+         *  after gson loads an old data file; loadData() folds it into
+         *  {@link #items} and nulls it, so the next save writes the new format. */
+        public List<String> inventoryNbt;
 
-        public ActiveNPCData(UUID playerUuid, UUID npcUuid, List<ItemStack> inventory, ServerLevel world) {
+        public ActiveNPCData(UUID playerUuid, UUID npcUuid, List<SlottedInventory.SlottedStack> inventory, ServerLevel world) {
             this.playerUuid = playerUuid;
             this.npcUuid = npcUuid;
-            this.inventoryNbt = new ArrayList<>();
-            for (ItemStack stack : inventory) {
-                if (!stack.isEmpty()) {
-                    try {
-                        CompoundTag tag = (CompoundTag) ItemStack.CODEC.encodeStart(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), stack)
-                            .getOrThrow(e -> new RuntimeException("Failed to encode item: " + e));
-                        
-                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                        NbtIo.writeCompressed(tag, baos);
-                        this.inventoryNbt.add(Base64.getEncoder().encodeToString(baos.toByteArray()));
-                    } catch (Exception e) {
-                        Combatpersistence.LOGGER.error("Failed to encode item to Base64 NBT", e);
-                    }
-                }
-            }
+            this.items = SlottedInventory.encodeAll(world, inventory);
         }
     }
 
@@ -69,12 +56,15 @@ public class CombatTracker {
         return Collections.unmodifiableMap(combatEndTimes);
     }
 
-    public void addNPC(UUID playerUuid, UUID npcUuid, List<ItemStack> inventory, ServerLevel world) {
-        activeNPCs.put(playerUuid, new ActiveNPCData(playerUuid, npcUuid, inventory, world));
+    public void addNPC(UUID playerUuid, UUID npcUuid, List<SlottedInventory.SlottedStack> inventory, ServerLevel world) {
+        ActiveNPCData data = new ActiveNPCData(playerUuid, npcUuid, inventory, world);
+        activeNPCs.put(playerUuid, data);
         // Synchronous: the caller clears the player's live inventory right after
         // this, and vanilla then writes the emptied player.dat. If the server dies
         // before this snapshot reaches the disk, the items exist nowhere.
         saveData(false);
+        Combatpersistence.debug("Tracker entry for {} persisted synchronously ({} items, NPC {})",
+            playerUuid, data.items.size(), npcUuid);
     }
 
     public UUID getNPCForPlayer(UUID playerUuid) {
@@ -107,6 +97,7 @@ public class CombatTracker {
         pendingJoinDeaths.add(playerUuid);
         activeNPCs.remove(playerUuid);
         saveData();
+        Combatpersistence.debug("Marked offline combat-log death for {} (tracker entry removed; they die on next join)", playerUuid);
     }
 
     public boolean checkAndClearOfflineDeath(UUID playerUuid) {
@@ -141,6 +132,7 @@ public class CombatTracker {
         if (entity instanceof CombatNPC npc) {
             List<ItemStack> inventory = npc.getStoredInventory();
             if (!inventory.isEmpty()) {
+                int count = inventory.size();
                 for (ItemStack stack : inventory) {
                     entity.spawnAtLocation((ServerLevel) entity.level(), stack);
                 }
@@ -149,6 +141,8 @@ public class CombatTracker {
                 // (e.g. /kill on a dying entity). Clear the list so a second pass
                 // can't drop the whole inventory again.
                 inventory.clear();
+                Combatpersistence.debug("CombatNPC of {} died at {}: dropped {} stored items",
+                    npc.originalPlayerName, entity.blockPosition(), count);
             } else {
                 for (ActiveNPCData data : activeNPCs.values()) {
                     if (data.npcUuid.equals(entityUuid)) {
@@ -175,19 +169,16 @@ public class CombatTracker {
 
     private void dropNpcInventory(Entity entity, ActiveNPCData data) {
         if (entity.level() instanceof ServerLevel world) {
-            for (String b64 : data.inventoryNbt) {
-                try {
-                    byte[] bytes = Base64.getDecoder().decode(b64);
-                    CompoundTag tag = NbtIo.readCompressed(new ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap());
-                    ItemStack.CODEC.parse(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), tag)
-                        .resultOrPartial(e -> Combatpersistence.LOGGER.error("Failed to decode item: {}", e))
-                        .ifPresent(stack -> {
-                             entity.spawnAtLocation(world, stack);
-                        });
-                } catch (Exception e) {
-                    Combatpersistence.LOGGER.error("Failed to parse NPC inventory item from Base64", e);
+            int count = 0;
+            for (SlottedInventory.SlotItem item : data.items) {
+                ItemStack stack = SlottedInventory.decode(world, item.nbt);
+                if (stack != null && !stack.isEmpty()) {
+                    entity.spawnAtLocation(world, stack);
+                    count++;
                 }
             }
+            Combatpersistence.debug("Dropped {} tracker-stored items for {} at {} (fallback drop path)",
+                count, data.playerUuid, entity.blockPosition());
         }
     }
 
@@ -239,12 +230,36 @@ public class CombatTracker {
                 if (root.has("activeNPCs")) {
                     Type mapType = new TypeToken<ConcurrentHashMap<UUID, ActiveNPCData>>(){}.getType();
                     Map<UUID, ActiveNPCData> loaded = GSON.fromJson(root.get("activeNPCs"), mapType);
-                    if (loaded != null) activeNPCs.putAll(loaded);
+                    if (loaded != null) {
+                        loaded.values().forEach(CombatTracker::normalizeLoadedEntry);
+                        activeNPCs.putAll(loaded);
+                    }
                 }
             } catch (Exception e) {
                 Combatpersistence.LOGGER.error("Failed to load combat data", e);
             }
         }
+    }
+
+    /**
+     * Folds a legacy flat-list entry (pre-slot data format) into the slotted
+     * format in memory; the next save rewrites the file in the new format.
+     * Legacy items carry NO_SLOT and restore through the generic add() path.
+     * Runs during static init, before the config loads, so it logs directly
+     * (a one-time migration is worth an unconditional INFO line).
+     */
+    private static void normalizeLoadedEntry(ActiveNPCData data) {
+        if (data.items == null) {
+            data.items = new ArrayList<>();
+            if (data.inventoryNbt != null) {
+                for (String b64 : data.inventoryNbt) {
+                    data.items.add(new SlottedInventory.SlotItem(SlottedInventory.NO_SLOT, b64));
+                }
+                Combatpersistence.LOGGER.info("Migrated legacy combat data entry for {} ({} items, restored slotless)",
+                    data.playerUuid, data.items.size());
+            }
+        }
+        data.inventoryNbt = null;
     }
 
     public void tick(net.minecraft.server.MinecraftServer server) {
@@ -263,6 +278,8 @@ public class CombatTracker {
                             break;
                         }
                     }
+                    Combatpersistence.debug("Combat tag expired for {}; NPC {} discarded, tracker entry kept for rejoin restore",
+                        playerUuid, npcData.npcUuid);
                 }
                 it.remove();
             }
@@ -271,24 +288,32 @@ public class CombatTracker {
 
     public void restoreInventory(ServerPlayer player) {
         ActiveNPCData data = activeNPCs.get(player.getUUID());
-        if (data == null) return;
+        if (data == null) {
+            Combatpersistence.debug("No combat-log tracker entry for {}; nothing to restore", player.getName().getString());
+            return;
+        }
 
         ServerLevel world = player.level();
-        for (String b64 : data.inventoryNbt) {
-            try {
-                byte[] bytes = Base64.getDecoder().decode(b64);
-                CompoundTag tag = NbtIo.readCompressed(new ByteArrayInputStream(bytes), NbtAccounter.unlimitedHeap());
-                ItemStack.CODEC.parse(world.registryAccess().createSerializationContext(NbtOps.INSTANCE), tag)
-                    .resultOrPartial(e -> Combatpersistence.LOGGER.error("Failed to decode restored item: {}", e))
-                    .ifPresent(stack -> {
-                         if (!player.getInventory().add(stack)) {
-                             player.drop(stack, false);
-                         }
-                    });
-            } catch (Exception e) {
-                Combatpersistence.LOGGER.error("Failed to parse restored inventory item from Base64", e);
-            }
+        SlottedInventory.DecodeResult decoded = SlottedInventory.decodeAll(world, data.items);
+
+        // Full decode success makes this snapshot authoritative: wipe the live
+        // inventory first (killing any stale player.dat copy left by an old
+        // dupe or crash window) and put every item back in its exact slot. On
+        // any decode failure keep whatever the player is holding and restore
+        // additively instead — prefer a dupe over item loss.
+        boolean clearFirst = decoded.failures() == 0;
+        if (!clearFirst) {
+            Combatpersistence.LOGGER.warn(
+                "{} of {} stored items failed to decode for {} — restoring additively, live inventory NOT cleared (prefer dupe over loss)",
+                decoded.failures(), data.items.size(), player.getName().getString());
         }
+
+        SlottedInventory.PlaceResult result = SlottedInventory.place(player, decoded.items(), clearFirst);
+        Combatpersistence.debug(
+            "Restored combat-log inventory for {}: {} items ({} exact slot of which {} equipment, {} loose, {} dropped), clearedFirst={}",
+            player.getName().getString(), decoded.items().size(),
+            result.exact(), result.equipped(), result.loose(), result.dropped(), clearFirst);
+
         player.sendSystemMessage(net.minecraft.network.chat.Component.literal(Combatpersistence.config.inventoryRestoredMessage));
 
         // Only drop the tracker entry once the items are back in the live

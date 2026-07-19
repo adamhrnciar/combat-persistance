@@ -33,6 +33,7 @@ The configuration file is located at `config/combatpersistence.json`.
 | `playSpawnSound` | `true` | Plays a thunder sound when an NPC spawns. |
 | `combatMessage` | `§c§lIN COMBAT: §f%s s remaining` | The action bar message shown to tagged players. Use `%s` for time remaining. |
 | `npcDeathBroadcast` | `§c[PvP] §7%s combat logged and was slain!` | The message broadcast when an NPC is killed. |
+| `debugLogging` | `false` | Verbose INFO-level diagnostics for combat-log snapshots, restores and NPC lifecycle — for debugging on production servers. Errors are always logged regardless. |
 | `inventoryRestoredMessage` | `§aYour inventory has been restored.` | Message sent when a player's inventory is restored. |
 | `blockedCommands` | `[...]` | List of commands disabled during combat (e.g., /spawn, /home). Namespaced forms like `/minecraft:tp` are blocked automatically; command *aliases* (e.g. `/teleport` for `/tp`) need their own entry. |
 | `commandBlockedInCombatMessage` | `§cYou cannot use this command while in combat!` | Message shown when a blocked command is used in combat. |

@@ -30,7 +30,16 @@
 
 ---
 
-## 🆕 What's New in 1.8.0
+## 🆕 What's New in 1.9.0
+
+- 🩹 **Fixed armor unequipping on combat-log rejoin** — inventory snapshots now record each item's slot; armor and offhand go back on the body and every item returns to its exact slot.
+- 🧬 **Fixed a major item-duplication exploit** — on a hard disconnect (the real combat-log case) the inventory clear raced vanilla's player save on another thread, so players could rejoin with their items *plus* a full dropped copy. Disconnect handling now runs on the main thread, strictly before the player file is written.
+- 🛑 **Fixed a guaranteed dupe on `/stop`** — server shutdown no longer spawns combat NPCs; tagged players simply keep their items across the restart.
+- 🧷 **Authoritative restore** — when every stored item decodes, the restore wipes stale live copies before placing items back, collapsing any historical dupes into a single inventory. On any decode failure it falls back to an additive restore — items are never lost.
+- 🔎 **New `debugLogging` config** — verbose production diagnostics for snapshots, restores and NPC lifecycle (thread names, per-restore outcome counts). Errors always log regardless.
+- 📦 **Data format upgrade** — combat and pre-auth inventory files now store slot indices; old files migrate automatically on first boot (legacy entries restore slotless, nothing is lost). Downgrading to 1.8.x after 1.9.0 has written data is not supported.
+
+## 🗒️ What's New in 1.8.0
 
 - 🚨 **Fixed online-mode servers** — auth correctly never applies there; players were previously frozen, blocked, and kicked with "Login timeout".
 - 🧰 **Fixed open-container theft** — disconnecting in combat with a chest open no longer pulls the chest's contents into the combat-log NPC.
@@ -66,6 +75,7 @@ Everything lives in `config/combatpersistence.json` and generates on first launc
 | Setting | Default | What it does |
 | :--- | :--- | :--- |
 | `combatTagDurationSeconds` | `15` | Length of the combat tag. |
+| `debugLogging` | `false` | Verbose combat-log/restore diagnostics for production debugging. |
 | `blockedCommands` | `/spawn, /home, /tp, /tpa, /warp, /back` | Commands disabled while tagged. |
 | `disableEnderChests` | `false` | Block ender chests server-wide (arena/SMP). |
 | `enableAuth` | `true` | Toggle the whole authentication system. |

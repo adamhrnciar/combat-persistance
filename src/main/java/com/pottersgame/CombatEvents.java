@@ -16,9 +16,6 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
-import net.minecraft.world.inventory.ResultContainer;
-import net.minecraft.world.inventory.Slot;
-import net.minecraft.world.inventory.TransientCraftingContainer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
@@ -101,6 +98,7 @@ public class CombatEvents {
             if (entity instanceof CombatNPC) {
                 if (!tracker.isNpcActive(entity.getUUID())) {
                     entity.discard();
+                    Combatpersistence.debug("Discarded stale CombatNPC {} on load (no tracker entry)", entity.getUUID());
                 }
             } else if (entity instanceof Mannequin && tracker.isNpcActive(entity.getUUID())) {
                 // NPCs saved to disk by older versions reload as plain vanilla
@@ -109,63 +107,19 @@ public class CombatEvents {
                 // tracked NPC UUID loading from a chunk is such a stale leftover. The
                 // tracker entry stays so the player still gets their items on rejoin.
                 entity.discard();
+                Combatpersistence.debug("Discarded stale legacy mannequin {} on load (tracker entry kept)", entity.getUUID());
             }
         });
 
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-            ServerPlayer player = handler.getPlayer();
-            UUID uuid = player.getUUID();
-            boolean authenticated = Combatpersistence.authManager.isAuthenticated(player);
-            boolean inCombat = tracker.isInCombat(player);
-
-            Combatpersistence.LOGGER.info("Player {} disconnected. Auth: {}, InCombat: {}", player.getName().getString(), authenticated, inCombat);
-
-            if (authenticated && inCombat) {
-                Combatpersistence.LOGGER.info("Spawning CombatNPC for {}...", player.getName().getString());
-                List<ItemStack> fullInv = new ArrayList<>();
-                // Copy all items including cursor stack
-                for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
-                    fullInv.add(player.getInventory().getItem(i).copy());
-                }
-
-                // CRITICAL: Include the item currently held by the cursor (ScreenHandler stack)
-                ItemStack cursorStack = player.containerMenu.getCarried().copy();
-                if (!cursorStack.isEmpty()) {
-                    fullInv.add(cursorStack);
-                }
-
-                // Sweep items sitting in TRANSIENT slots (crafting grids and their
-                // result slot), which vanilla would otherwise drop on the ground.
-                // Only transient containers: matching every non-player-inventory
-                // slot would also empty an open chest/barrel into the NPC —
-                // stealing the container's contents.
-                for (Slot slot : player.containerMenu.slots) {
-                    if (slot.container instanceof TransientCraftingContainer || slot.container instanceof ResultContainer) {
-                        ItemStack stack = slot.getItem();
-                        if (!stack.isEmpty()) {
-                            fullInv.add(stack.copy());
-                            slot.set(ItemStack.EMPTY); // Clear to prevent vanilla from dropping it
-                        }
-                    }
-                }
-
-                CombatNPC npc = CombatNPC.spawn(player, fullInv);
-
-                if (npc != null) {
-                    Combatpersistence.LOGGER.info("Successfully initiated CombatNPC for {}. NPC UUID: {}", player.getName().getString(), npc.getUUID());
-                } else {
-                    Combatpersistence.LOGGER.error("Failed to spawn CombatNPC for {}!", player.getName().getString());
-                }
-
-                // CRITICAL FIX: Clear everything before the server saves the player data
-                player.getInventory().clearContent();
-                player.containerMenu.setCarried(ItemStack.EMPTY); // Clear cursor stack
-            } else if (inCombat) {
-                Combatpersistence.LOGGER.warn("Player {} was in combat but NOT authenticated! No NPC spawned.", player.getName().getString());
-            }
-            Combatpersistence.authManager.logout(player);
-            joinTimes.remove(uuid);
-        });
+        // NOTE: combat-log handling deliberately does NOT use Fabric's
+        // DISCONNECT event — it lives in handlePlayerRemove, invoked from
+        // PlayerListRemoveMixin at the HEAD of PlayerList.remove. On a real
+        // combat log (socket drop) the Fabric event fires from
+        // Connection.channelInactive on the NETTY thread and races the main
+        // thread's PlayerList.remove -> save(player): the save frequently won,
+        // player.dat kept the full inventory, and the tracker restored a second
+        // copy on rejoin — the item-dupe bug. The remove hook is always on the
+        // main thread and always runs before that save.
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayer player = handler.getPlayer();
@@ -308,6 +262,83 @@ public class CombatEvents {
         });
     }
 
+    /**
+     * Disconnect handling, called from PlayerListRemoveMixin at the HEAD of
+     * PlayerList.remove(ServerPlayer) — guaranteed main thread and guaranteed
+     * to run before vanilla writes player.dat inside that same method, so the
+     * combat-log inventory clear is always captured by the save. Not called on
+     * server stop: /stop saves everyone via saveAll() and never runs
+     * PlayerList.remove, so a tagged player simply keeps their items there
+     * (shutdown is not combat logging).
+     */
+    public static void handlePlayerRemove(ServerPlayer player) {
+        UUID uuid = player.getUUID();
+        CombatTracker tracker = Combatpersistence.tracker;
+        boolean authenticated = Combatpersistence.authManager.isAuthenticated(player);
+        boolean inCombat = tracker.isInCombat(player);
+
+        Combatpersistence.LOGGER.info("Player {} disconnected. Thread: {}, Auth: {}, InCombat: {}",
+            player.getName().getString(), Thread.currentThread().getName(), authenticated, inCombat);
+
+        try {
+            if (authenticated && inCombat) {
+                if (tracker.getNPCForPlayer(uuid) != null) {
+                    // A tracker entry already holds this player's items — snapshotting
+                    // the (already cleared) live inventory again would overwrite the
+                    // durable copy with an empty one.
+                    Combatpersistence.LOGGER.error(
+                        "Combat-log handling re-entered for {} with a live tracker entry — skipping snapshot",
+                        player.getName().getString());
+                } else {
+                    Combatpersistence.LOGGER.info("Spawning CombatNPC for {}...", player.getName().getString());
+                    List<SlottedInventory.SlottedStack> fullInv = SlottedInventory.snapshot(player);
+
+                    int main = 0, armor = 0, offhand = 0, slotless = 0;
+                    for (SlottedInventory.SlottedStack item : fullInv) {
+                        if (item.slot() == SlottedInventory.NO_SLOT) slotless++;
+                        else if (item.slot() < SlottedInventory.MAIN_SIZE) main++;
+                        else if (item.slot() == SlottedInventory.OFFHAND_SLOT) offhand++;
+                        else armor++;
+                    }
+                    Combatpersistence.debug("Snapshot for {}: {} items ({} main, {} armor, {} offhand, {} cursor/crafting)",
+                        player.getName().getString(), fullInv.size(), main, armor, offhand, slotless);
+
+                    CombatNPC npc = CombatNPC.spawn(player, fullInv);
+                    if (npc != null) {
+                        Combatpersistence.LOGGER.info("Successfully initiated CombatNPC for {}. NPC UUID: {}",
+                            player.getName().getString(), npc.getUUID());
+                    } else {
+                        Combatpersistence.LOGGER.error("Failed to spawn CombatNPC for {}!", player.getName().getString());
+                    }
+
+                    // Only destroy the live copy once the snapshot is durably on
+                    // disk (addNPC saves synchronously inside spawn). Vanilla
+                    // writes player.dat right after this hook returns, so it
+                    // saves the emptied inventory.
+                    if (tracker.getNPCForPlayer(uuid) != null) {
+                        player.getInventory().clearContent();
+                        player.containerMenu.setCarried(ItemStack.EMPTY);
+                        Combatpersistence.debug("Cleared live inventory of {} after snapshot", player.getName().getString());
+                    } else {
+                        Combatpersistence.LOGGER.error(
+                            "No durable tracker entry for {} after NPC spawn — live inventory NOT cleared",
+                            player.getName().getString());
+                    }
+                }
+            } else if (inCombat) {
+                Combatpersistence.LOGGER.warn("Player {} was in combat but NOT authenticated! No NPC spawned.",
+                    player.getName().getString());
+            }
+        } catch (Exception e) {
+            // This hook sits at the head of PlayerList.remove — an escaping
+            // exception would abort vanilla's player.dat save and player-list
+            // cleanup for this player.
+            Combatpersistence.LOGGER.error("Combat-log disconnect handling failed for {}", player.getName().getString(), e);
+        }
+        Combatpersistence.authManager.logout(player);
+        joinTimes.remove(uuid);
+    }
+
     private static void teleportToLobby(MinecraftServer server, ServerPlayer player, CombatConfig config) {
         ServerLevel lobbyLevel = server.getLevel(config.lobbyDimensionKey());
         if (lobbyLevel == null) return;
@@ -321,6 +352,7 @@ public class CombatEvents {
 
     public static void handlePendingDeath(ServerPlayer player) {
         if (Combatpersistence.tracker.isPendingDeath(player.getUUID())) {
+            Combatpersistence.debug("Executing pending combat-log death for {} on join", player.getName().getString());
             player.getInventory().clearContent();
             player.setHealth(0.0f);
             player.die(player.level().damageSources().generic());
