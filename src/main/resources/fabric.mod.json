@@ -5,10 +5,10 @@
 	"name": "Combat Persistence",
 	"description": "Prevents combat logging by spawning a persistent NPC (Mannequin) when a player disconnects in combat.",
 	"authors": [
-		"PottersGame"
+		"Adam Hrnčiar"
 	],
 	"contact": {
-		"sources": "https://github.com/PottersGame/combat-persistance"
+		"sources": "https://github.com/adamhrnciar/combat-persistance"
 	},
 	"license": "GPL-3.0",
 	"icon": "assets/combatpersistence/icon.png",

@@ -104,4 +104,4 @@ If this mod helps your server, you can support development here: **[ko-fi.com/po
 
 ---
 
-[Source Code](https://github.com/PottersGame/combat-persistance) · [Issue Tracker](https://github.com/PottersGame/combat-persistance/issues) · [GPL-3.0 License](https://github.com/PottersGame/combat-persistance/blob/main/LICENSE)
+[Source Code](https://github.com/adamhrnciar/combat-persistance) · [Issue Tracker](https://github.com/adamhrnciar/combat-persistance/issues) · [GPL-3.0 License](https://github.com/adamhrnciar/combat-persistance/blob/main/LICENSE)

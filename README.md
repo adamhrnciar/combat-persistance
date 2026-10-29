@@ -99,7 +99,7 @@ If you find this mod useful, you can support development here:
 
 ## Installation
 
-1.  Download the latest release from [GitHub](https://github.com/PottersGame/combat-persistance/releases).
+1.  Download the latest release from [GitHub](https://github.com/adamhrnciar/combat-persistance/releases).
 2.  Place the `.jar` in your server's `mods` folder.
 3.  Ensure **Fabric API** is installed.
 
