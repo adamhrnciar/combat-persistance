@@ -40,13 +40,10 @@ replay_*.log
 *.hprof
 *.jfr
 
-# AI assistant configs / local tooling (keep the mc-lookup helper, drop the rest)
-.gemini/*
-!.gemini/mc-lookup.py
-.gemini/__pycache__/
+# Local AI tooling
+.claude/
+.gemini/
 .rtk/
-.claude/*
-!.claude/skills/
+CLAUDE.md
 GEMINI.md
-# CLAUDE.md is versioned so CI agents and clones get it
 gha-creds-*.json
