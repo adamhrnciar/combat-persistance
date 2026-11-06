@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "combatpersistence_validation",
+  "version": "0.0.0-test-only",
+  "name": "Combat Persistence disposable validation harness",
+  "environment": "server",
+  "entrypoints": { "main": ["com.pottersgame.validation.LiveValidationMod"] },
+  "depends": { "fabricloader": "*", "fabric-api": "*", "combatpersistence": "*" }
+}

@@ -17,17 +17,24 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.portal.TeleportTransition;
 
-import java.io.InputStreamReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
@@ -36,7 +43,12 @@ public class SkinManager {
     /** Cached lookup result; {@code property == null} caches a failed lookup so bad names don't re-hit the API. */
     private record CacheEntry(Property property, long fetchedAt) {}
 
-    private static final Map<String, CacheEntry> skinCache = new ConcurrentHashMap<>();
+    private static final Object LOOKUP_LOCK = new Object();
+    private static final int MAX_CACHE_ENTRIES = 1024;
+    private static final int MAX_RESPONSE_BYTES = 64 * 1024;
+    private static final Map<String, CacheEntry> skinCache = new LinkedHashMap<>(16, 0.75f, true);
+    private static final Map<String, CompletableFuture<Property>> inFlightLookups = new HashMap<>();
+    private static final Map<UUID, Object> pendingApplications = new ConcurrentHashMap<>();
     private static final long CACHE_TTL_MS = 6 * 60 * 60 * 1000L;      // successful lookups: 6 hours
     private static final long NEGATIVE_TTL_MS = 10 * 60 * 1000L;       // failed lookups: 10 minutes
 
@@ -48,7 +60,8 @@ public class SkinManager {
 
     // Dedicated bounded pool for blocking HTTP calls so we never starve the
     // shared common ForkJoinPool (used by the server for parallel streams etc.).
-    private static final Executor SKIN_EXECUTOR = Executors.newFixedThreadPool(4, new ThreadFactory() {
+    private static final ThreadPoolExecutor SKIN_EXECUTOR = new ThreadPoolExecutor(
+        4, 4, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(64), new ThreadFactory() {
         private final AtomicInteger counter = new AtomicInteger(1);
 
         @Override
@@ -57,7 +70,7 @@ public class SkinManager {
             t.setDaemon(true);
             return t;
         }
-    });
+    }, new ThreadPoolExecutor.AbortPolicy());
 
     /** Copy of {@code base} with its textures property replaced. */
     public static GameProfile withTextures(GameProfile base, Property texture) {
@@ -76,34 +89,58 @@ public class SkinManager {
      * The returned future completes with null when no skin could be resolved.
      */
     public static CompletableFuture<Property> fetchSkin(String identifier) {
-        if (identifier == null) {
+        if (Combatpersistence.config == null || !Combatpersistence.config.enableSkinLookups
+                || !isValidIdentifier(identifier)) {
             return CompletableFuture.completedFuture(null);
-        }
-        CacheEntry cached = skinCache.get(identifier);
-        if (cached != null) {
-            long ttl = cached.property() != null ? CACHE_TTL_MS : NEGATIVE_TTL_MS;
-            if (System.currentTimeMillis() - cached.fetchedAt() < ttl) {
-                return CompletableFuture.completedFuture(cached.property());
-            }
-            skinCache.remove(identifier, cached);
         }
 
         // Reject anything that isn't a plain Mojang username or UUID before it ever
         // reaches a URL. This prevents URL/path injection and SSRF via crafted input.
         boolean looksLikeUuid = UUID_PATTERN.matcher(identifier).matches();
-        boolean looksLikeName = USERNAME_PATTERN.matcher(identifier).matches();
-        if (!looksLikeUuid && !looksLikeName) {
-            Combatpersistence.LOGGER.warn("Rejected skin lookup for invalid identifier: {}", identifier);
-            return CompletableFuture.completedFuture(null);
-        }
+        String key = identifier.toLowerCase(Locale.ROOT);
+        if (looksLikeUuid) key = key.replace("-", "");
+        final String lookupKey = key;
+        synchronized (LOOKUP_LOCK) {
+            CacheEntry cached = skinCache.get(lookupKey);
+            if (cached != null) {
+                long ttl = cached.property() != null ? CACHE_TTL_MS : NEGATIVE_TTL_MS;
+                if (System.currentTimeMillis() - cached.fetchedAt() < ttl) {
+                    return CompletableFuture.completedFuture(cached.property());
+                }
+                skinCache.remove(lookupKey);
+            }
+            CompletableFuture<Property> existing = inFlightLookups.get(lookupKey);
+            if (existing != null) return existing;
 
-        return CompletableFuture.supplyAsync(() -> {
-            Property property = lookupSkin(identifier, looksLikeName && !looksLikeUuid);
-            // Cache failures too (negative TTL) so a misspelled name can't be
-            // spammed into Mojang API rate-limit exhaustion.
-            skinCache.put(identifier, new CacheEntry(property, System.currentTimeMillis()));
-            return property;
-        }, SKIN_EXECUTOR);
+            CompletableFuture<Property> future = new CompletableFuture<>();
+            inFlightLookups.put(lookupKey, future);
+            try {
+                SKIN_EXECUTOR.execute(() -> {
+                    Property property = Combatpersistence.config != null && Combatpersistence.config.enableSkinLookups
+                        ? lookupSkin(lookupKey, !looksLikeUuid) : null;
+                    // Cache failures too (negative TTL) so a misspelled name can't be
+                    // spammed into Mojang API rate-limit exhaustion.
+                    synchronized (LOOKUP_LOCK) {
+                        skinCache.put(lookupKey, new CacheEntry(property, System.currentTimeMillis()));
+                        while (skinCache.size() > MAX_CACHE_ENTRIES) {
+                            skinCache.remove(skinCache.keySet().iterator().next());
+                        }
+                        inFlightLookups.remove(lookupKey, future);
+                    }
+                    future.complete(property);
+                });
+            } catch (RejectedExecutionException e) {
+                // A full queue must not block the game thread or grow without limit.
+                inFlightLookups.remove(lookupKey, future);
+                future.complete(null);
+            }
+            return future;
+        }
+    }
+
+    public static boolean isValidIdentifier(String identifier) {
+        return identifier != null && (USERNAME_PATTERN.matcher(identifier).matches()
+            || UUID_PATTERN.matcher(identifier).matches());
     }
 
     private static Property lookupSkin(String identifier, boolean resolveNameFirst) {
@@ -149,12 +186,22 @@ public class SkinManager {
         HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
         try {
             conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(false);
+            conn.setUseCaches(false);
+            conn.setRequestProperty("Accept", "application/json");
             conn.setConnectTimeout(5000);
             conn.setReadTimeout(5000);
             int code = conn.getResponseCode();
             if (code == 200) {
-                try (InputStreamReader reader = new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)) {
-                    return JsonParser.parseReader(reader).getAsJsonObject();
+                if (conn.getContentLengthLong() > MAX_RESPONSE_BYTES) {
+                    throw new IOException("Mojang response exceeds the skin lookup size limit");
+                }
+                try (InputStream stream = conn.getInputStream()) {
+                    byte[] body = stream.readNBytes(MAX_RESPONSE_BYTES + 1);
+                    if (body.length > MAX_RESPONSE_BYTES) {
+                        throw new IOException("Mojang response exceeds the skin lookup size limit");
+                    }
+                    return JsonParser.parseString(new String(body, StandardCharsets.UTF_8)).getAsJsonObject();
                 }
             }
             if (code == 429) {
@@ -167,25 +214,37 @@ public class SkinManager {
     }
 
     public static void applySkin(ServerPlayer player, String skinName) {
+        if (Combatpersistence.config == null || !Combatpersistence.config.enableSkinLookups
+                || !isValidIdentifier(skinName)
+                || !Combatpersistence.authManager.isAuthenticated(player)
+                || player.isRemoved() || player.connection == null
+                || !player.connection.isAcceptingMessages()) return;
         MinecraftServer server = player.level().getServer();
+        UUID uuid = player.getUUID();
+        if (server.getPlayerList().getPlayer(uuid) != player) return;
+        Object request = new Object();
+        pendingApplications.put(uuid, request);
 
-        fetchSkin(skinName).thenAccept(skinProperty -> {
-            if (skinProperty != null) {
-                server.execute(() -> {
-                    if (player.isRemoved() || player.connection == null) return;
+        fetchSkin(skinName).thenAccept(skinProperty -> server.execute(() -> {
+            // An old request must not update a replacement connection or
+            // overwrite a newer /skin request after the HTTP call finishes.
+            if (!pendingApplications.remove(uuid, request) || skinProperty == null
+                    || !Combatpersistence.config.enableSkinLookups
+                    || player.isRemoved() || player.connection == null
+                    || !player.connection.isAcceptingMessages()
+                    || server.getPlayerList().getPlayer(uuid) != player
+                    || !Combatpersistence.authManager.isAuthenticated(player)) return;
 
-                    GameProfile newProfile = withTextures(player.getGameProfile(), skinProperty);
+            GameProfile newProfile = withTextures(player.getGameProfile(), skinProperty);
 
-                    // Swap the profile through the accessor mixin — reflection by
-                    // field name only worked in dev, where fields aren't remapped.
-                    ((PlayerAccessor) player).combatpersistence$setGameProfile(newProfile);
+            // Swap the profile through the accessor mixin — reflection by
+            // field name only worked in dev, where fields aren't remapped.
+            ((PlayerAccessor) player).combatpersistence$setGameProfile(newProfile);
 
-                    // Refresh player for everyone
-                    refreshPlayer(player);
-                    Combatpersistence.LOGGER.info("Applied skin {} to player {}", skinName, player.getName().getString());
-                });
-            }
-        });
+            // Refresh player for everyone
+            refreshPlayer(player);
+            Combatpersistence.debug("Applied skin {} to player {}", skinName, player.getName().getString());
+        }));
     }
 
     private static void refreshPlayer(ServerPlayer player) {

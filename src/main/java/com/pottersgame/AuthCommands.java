@@ -11,7 +11,6 @@ import net.minecraft.server.permissions.Permissions;
 
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class AuthCommands {
@@ -49,22 +48,21 @@ public class AuthCommands {
                     }
                     // BCrypt silently truncates past 72 bytes; refuse instead of
                     // storing a hash of a truncated password.
-                    if (pwd.length() > Combatpersistence.config.maxPasswordLength) {
+                    if (!AuthManager.isPasswordWithinLimit(pwd, Combatpersistence.config.maxPasswordLength)) {
                         player.sendSystemMessage(Component.literal(
                             String.format(Combatpersistence.config.passwordTooLong, Combatpersistence.config.maxPasswordLength)));
                         return 0;
                     }
 
-                    CompletableFuture.runAsync(() -> {
-                        Combatpersistence.authManager.register(player, pwd);
-                        context.getSource().getServer().execute(() -> {
-                            // Verify player is still connected and valid after async hashing
-                            if (player.connection != null && !player.isRemoved()) {
-                                Combatpersistence.authManager.onAuthenticated(player);
-                                player.sendSystemMessage(Component.literal(Combatpersistence.config.registerSuccess));
-                                SkinManager.applySkin(player, player.getName().getString());
-                            }
-                        });
+                    Combatpersistence.authManager.authenticate(player, pwd, true, result -> {
+                        if (result == AuthManager.LoginResult.SUCCESS) {
+                            // Verify player is still connected and valid after async hashing.
+                            if (!Combatpersistence.authManager.onAuthenticated(player)) return;
+                            player.sendSystemMessage(Component.literal(Combatpersistence.config.registerSuccess));
+                            SkinManager.applySkin(player, player.getName().getString());
+                        } else {
+                            handleFailure(player, result);
+                        }
                     });
                     
                     return 1;
@@ -81,35 +79,16 @@ public class AuthCommands {
                         return 0;
                     }
 
-                    CompletableFuture.runAsync(() -> {
-                        AuthManager.LoginResult result = Combatpersistence.authManager.login(player, pwd);
-                        context.getSource().getServer().execute(() -> {
-                            // Verify player is still connected and valid after async hashing
-                            if (player.connection == null || player.isRemoved()) return;
-                            switch (result) {
-                                case SUCCESS -> {
-                                    Combatpersistence.authManager.onAuthenticated(player);
-                                    player.sendSystemMessage(Component.literal(Combatpersistence.config.loginSuccess));
-                                    String skin = Combatpersistence.authManager.getCustomSkin(player.getUUID());
-                                    SkinManager.applySkin(player, skin != null ? skin : player.getName().getString());
-                                }
-                                case LOCKED_OUT -> {
-                                    int secs = Combatpersistence.authManager.getLockoutSecondsRemaining(player);
-                                    Component msg = Component.literal(
-                                        String.format(Combatpersistence.config.loginLockedOutMessage, secs));
-                                    // Locked out means kicked: the join handler refuses the
-                                    // connection until the lockout expires.
-                                    player.connection.disconnect(msg);
-                                }
-                                case WRONG_PASSWORD -> {
-                                    if (Combatpersistence.config.kickOnWrongPassword) {
-                                        player.connection.disconnect(Component.literal(Combatpersistence.config.incorrectPassword));
-                                    } else {
-                                        player.sendSystemMessage(Component.literal(Combatpersistence.config.incorrectPassword));
-                                    }
-                                }
-                            }
-                        });
+                    Combatpersistence.authManager.authenticate(player, pwd, false, result -> {
+                        // Verify player is still connected and valid after async hashing.
+                        if (result == AuthManager.LoginResult.SUCCESS) {
+                            if (!Combatpersistence.authManager.onAuthenticated(player)) return;
+                            player.sendSystemMessage(Component.literal(Combatpersistence.config.loginSuccess));
+                            String skin = Combatpersistence.authManager.getCustomSkin(player.getUUID());
+                            SkinManager.applySkin(player, skin != null ? skin : player.getName().getString());
+                        } else {
+                            handleFailure(player, result);
+                        }
                     });
                     
                     return 1;
@@ -160,6 +139,15 @@ public class AuthCommands {
                         player.sendSystemMessage(Component.literal(Combatpersistence.config.authRequiredForSkin));
                         return 0;
                     }
+                    if (!Combatpersistence.config.enableSkinLookups) {
+                        player.sendSystemMessage(Component.literal("§cSkin lookups are disabled by this server."));
+                        return 0;
+                    }
+                    String skinName = StringArgumentType.getString(context, "name");
+                    if (!SkinManager.isValidIdentifier(skinName)) {
+                        player.sendSystemMessage(Component.literal("§cEnter a valid Minecraft username or UUID."));
+                        return 0;
+                    }
                     // Cooldown: each uncached lookup costs shared Mojang API quota.
                     long cooldownMs = Combatpersistence.config.skinCommandCooldownSeconds * 1000L;
                     long now = System.currentTimeMillis();
@@ -171,7 +159,6 @@ public class AuthCommands {
                         return 0;
                     }
                     lastSkinUse.put(player.getUUID(), now);
-                    String skinName = StringArgumentType.getString(context, "name");
                     Combatpersistence.authManager.setCustomSkin(player.getUUID(), skinName);
                     SkinManager.applySkin(player, skinName);
                     player.sendSystemMessage(Component.literal(String.format(Combatpersistence.config.skinAppliedMessage, skinName)));
@@ -179,4 +166,25 @@ public class AuthCommands {
                 })));
         });
     }
+    private static void handleFailure(ServerPlayer player, AuthManager.LoginResult result) {
+        switch (result) {
+            case LOCKED_OUT -> {
+                int secs = Combatpersistence.authManager.getLockoutSecondsRemaining(player);
+                Component msg = Component.literal(String.format(Combatpersistence.config.loginLockedOutMessage, secs));
+                // Locked out means kicked: joins remain blocked until lockout expires.
+                player.connection.disconnect(msg);
+            }
+            case WRONG_PASSWORD -> {
+                if (Combatpersistence.config.kickOnWrongPassword) {
+                    player.connection.disconnect(Component.literal(Combatpersistence.config.incorrectPassword));
+                } else {
+                    player.sendSystemMessage(Component.literal(Combatpersistence.config.incorrectPassword));
+                }
+            }
+            case BUSY -> player.sendSystemMessage(Component.literal("§cAuthentication is busy. Please wait and try again."));
+            case ERROR -> player.connection.disconnect(Component.literal("§cAuthentication unavailable. Please contact an operator."));
+            case SUCCESS -> throw new IllegalArgumentException("Successful authentication is not a failure");
+        }
+    }
+
 }

@@ -1,6 +1,6 @@
 # Combat Persistence
 
-Combat Persistence is a server-side Fabric mod for Minecraft that prevents combat logging by spawning a persistent NPC (Mannequin) when a player disconnects during a fight. It is built for production servers where competitive integrity and security are priority.
+Combat Persistence is a server-side Fabric mod for Minecraft PvP and SMP servers. When a tagged player disconnects, a vulnerable mannequin keeps the fight open for the remaining combat tag. Players need no client mod.
 
 ## Features
 
@@ -12,9 +12,9 @@ Combat Persistence is a server-side Fabric mod for Minecraft that prevents comba
 *   **Offline Death**: If the NPC is killed, the player's items drop and they will die upon rejoining the server.
 *   **Authentication System**:
     *   **BCrypt Hashing**: Passwords are hashed, never stored in plaintext.
-    *   **Session Autologin**: Remembers a session for a configurable window (default 24 hours). Optional IP-based autologin is **off by default** (weak behind shared NAT/proxies).
+    *   **Optional IP Autologin**: Disabled by default. When enabled, an address match within the configured window (default 24 hours) bypasses password entry. Shared NAT, VPNs and proxies make this unsafe.
     *   **Brute-Force Lockout**: A wrong `/login` password kicks the player; after too many failed attempts the account — and the attacking IP — is locked and refused at join until the lockout expires.
-    *   **Inventory Protection**: Hides a player's inventory and coordinates until they enter their password, so an impostor sharing their offline UUID cannot view their items.
+    *   **Inventory Protection**: Hides inventory, position, and last-death coordinates before the initial play packets. Authentication applies to one connection, so a reconnect cannot inherit another connection's login.
     *   **Operator Reset**: `/authreset <player>` lets staff wipe a forgotten or compromised account.
     *   **Lobby Support**: Teleports unauthenticated players to a safe lobby dimension.
 *   **Arena/SMP Tools**: Optionally disable ender chests server-wide (blocked via mixin).
@@ -54,8 +54,9 @@ The configuration file is located at `config/combatpersistence.json`.
 | `maxLoginAttempts` | 5 | Failed `/login` attempts before lockout (tracked per account and per source IP). |
 | `loginLockoutSeconds` | 300 | Lockout duration after too many failed attempts. While locked out, the player is refused at join. |
 | `kickOnWrongPassword` | `true` | Kick the player immediately on a wrong `/login` password. |
-| `minPasswordLength` | 4 | Minimum password length accepted by `/register`. |
+| `minPasswordLength` | 8 | Minimum password length accepted by `/register`. |
 | `maxPasswordLength` | 64 | Maximum password length (BCrypt truncates beyond 72 bytes, so long passwords are refused rather than silently cut). |
+| `enableSkinLookups` | `false` | Opt in to external Mojang skin requests. Requests disclose the server IP and requested name/UUID. |
 | `skinCommandCooldownSeconds` | 30 | Cooldown between `/skin` uses, protecting the server's shared Mojang API rate limit. |
 | `hideInventoryBeforeAuth` | `true` | Conceals the player's inventory until they log in. |
 | `hideCoordinatesBeforeAuth`| `true` | Conceals the player's location from unauthenticated users. |
@@ -86,11 +87,23 @@ The configuration file is located at `config/combatpersistence.json`.
 ## Security
 
 This mod addresses several common vulnerabilities:
-*   **Cursor Stack Dupe**: Prevents item duplication via cursor holding during logout.
+*   **Crafting and Cursor Protection**: Snapshots include owned crafting and vanilla menu inputs, cursor items and equipment. Recipe result previews never become extra loot.
 *   **Ghost Inventory**: Ensures inventory state is cleared before the player fully disconnects.
-*   **Spoofing Protection**: Uses session secrets rather than just IP-based autologin.
+*   **Connection Protection**: Rejects duplicate player names/UUIDs before vanilla can kick the existing connection. Password verification results apply only to the original, still-connected player.
 *   **Signed-Command Bypass**: Auth and combat command blocking cover both the plain and the signed chat-command packet paths.
-*   **Thread Safety**: All data files are written through a single serialized writer thread, so concurrent saves can never overwrite newer data with a stale snapshot; critical snapshots (inventories) are flushed synchronously before the live copy is destroyed.
+*   **Durable Handoffs**: Serialized, atomic snapshot writes propagate failures. Inventory recovery commits player data before consuming its backup. NPC death commits its death record before exposing loot.
+
+### Deployment limits
+
+Prefer Minecraft online mode for public servers. Offline-mode password commands travel without Minecraft transport encryption; BCrypt protects stored hashes, not network traffic. Use a trusted encrypted tunnel or a correctly secured authentication proxy if offline mode is necessary. Never reuse an important password.
+
+Keep `enableIpAutoLogin=false`, `hideInventoryBeforeAuth=true` and `hideCoordinatesBeforeAuth=true` for the strongest built-in protection. An unregistered offline name belongs to whoever registers it first; use a whitelist and prearranged registration for existing players. Account lockouts can temporarily deny the real owner access, and restart clears the in-memory attempt counters.
+
+Custom skin requests are disabled by default. Enabling `enableSkinLookups` sends requested names/UUIDs and the server's IP to Mojang. Clients may also fetch the returned texture from Mojang. This setting does not control Minecraft's own network requests or other mods' behavior.
+
+Back up the world/player data together with `config/auth_data.json`, `pending_locations.json`, `pending_inventories.json` and `combat_persistence_data.json`. These files contain password hashes, inventory contents and coordinates; new atomic writes restrict them to the owner on POSIX filesystems. Restrict backup access too. Unreadable recovery or account files stop startup rather than silently treating players as unregistered.
+
+A crash after committing an NPC death or consuming an overflow recovery snapshot can still lose loot before the world saves it. Recovery favors preventing duplicate releases; it does not provide a transaction spanning player files, recovery files and world chunks. Other mods' custom inventories, commands and network packets require separate compatibility testing. Review [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for tested scope and remaining checks.
 
 ## Support
 
@@ -99,9 +112,12 @@ If you find this mod useful, you can support development here:
 
 ## Installation
 
-1.  Download the latest release from [GitHub](https://github.com/adamhrnciar/combat-persistance/releases).
-2.  Place the `.jar` in your server's `mods` folder.
-3.  Ensure **Fabric API** is installed.
+1.  Use a Minecraft **26.3** dedicated server with **Java 25 or later** and **Fabric Loader 0.20.1 or later**.
+2.  Download the matching release from [Modrinth](https://modrinth.com/mod/combat-persistence/versions).
+3.  Place the `.jar` and **Fabric API for Minecraft 26.3** in your server's `mods` folder.
+4.  Start the server, review `config/combatpersistence.json`, and test recovery on a disposable world before migration.
+
+Use Modrinth's version selector for older Minecraft releases. Each release supports only its listed game versions.
 
 ## License
 

@@ -40,6 +40,10 @@ replay_*.log
 *.hprof
 *.jfr
 
+# Python validation tools
+__pycache__/
+*.pyc
+
 # Local AI tooling
 .claude/
 .gemini/

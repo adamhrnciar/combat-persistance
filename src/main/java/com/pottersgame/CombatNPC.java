@@ -126,7 +126,15 @@ public class CombatNPC extends Mannequin {
         Combatpersistence.tracker.addNPC(original.getUUID(), npc.getUUID(), inventory, (ServerLevel) original.level());
         
         boolean spawned = world.addFreshEntity(npc);
-        Combatpersistence.LOGGER.info("Spawned CombatNPC for {} (UUID: {}). Success: {}", original.getName().getString(), npc.getUUID(), spawned);
+        if (!spawned) {
+            // Keep the durable tracker snapshot authoritative. The disconnect
+            // handler still clears the live copy, and rejoin restores it.
+            npc.discard();
+            Combatpersistence.LOGGER.error("Could not add CombatNPC for {} (UUID: {}); recovery snapshot retained",
+                playerName, npc.getUUID());
+            return null;
+        }
+        Combatpersistence.LOGGER.info("Spawned CombatNPC for {} (UUID: {})", playerName, npc.getUUID());
 
         if (config.playSpawnSound) {
             world.playSound(null, npc.getX(), npc.getY(), npc.getZ(), 

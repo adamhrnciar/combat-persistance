@@ -1,7 +1,7 @@
 plugins {
 	id 'net.fabricmc.fabric-loom' version "${loom_version}"
 	id 'maven-publish'
-	id 'com.modrinth.minotaur' version '2.+'
+	id 'com.modrinth.minotaur' version '2.10.0'
 }
 
 version = project.mod_version
@@ -31,6 +31,17 @@ dependencies {
     // BCrypt for secure password hashing
     implementation "org.mindrot:jbcrypt:0.4"
     include "org.mindrot:jbcrypt:0.4"
+
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.mockito:mockito-core:5.20.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    jvmArgs '-XX:ActiveProcessorCount=1', '-XX:+UseSerialGC'
+    maxHeapSize = '384m'
 }
 
 processResources {
@@ -39,6 +50,11 @@ processResources {
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
 	}
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -50,6 +66,19 @@ java {
 
 	sourceCompatibility = JavaVersion.VERSION_25
 	targetCompatibility = JavaVersion.VERSION_25
+}
+
+// Ship complete corresponding source, including the scripts needed to build it.
+tasks.named('sourcesJar', Jar) {
+    from('src') { into 'src' }
+    from('gradle') { into 'gradle' }
+    from('tools') {
+        into 'tools'
+        exclude '**/__pycache__/**', '**/*.pyc'
+    }
+    from('docs') { into 'docs' }
+    from('build.gradle', 'settings.gradle', 'gradle.properties', 'gradlew', 'gradlew.bat',
+        'LICENSE', 'README.md', 'MODRINTH.md', 'CHANGELOG.md', 'SECURITY_REVIEW.md')
 }
 
 jar {
@@ -65,12 +94,14 @@ modrinth {
 	projectId = "combat-persistence"
 	versionNumber = project.version
 	versionType = "release"
-	changelog = "See https://github.com/adamhrnciar/combat-persistance/releases/tag/v${project.version}"
+	changelog = rootProject.file('docs/release/changelog.md').getText('UTF-8')
 	// This loom setup has no remapJar task (mojmap runtime), so Minotaur
 	// cannot auto-detect the upload file — point it at the plain jar.
 	uploadFile = tasks.jar
+	additionalFiles = [tasks.sourcesJar]
 	gameVersions = [project.minecraft_version]
 	loaders = ["fabric"]
+	environment = "dedicated_server_only"
 	dependencies {
 		required.project "fabric-api"
 	}

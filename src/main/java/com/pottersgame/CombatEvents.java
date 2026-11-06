@@ -16,7 +16,6 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
@@ -29,7 +28,15 @@ public class CombatEvents {
 
     public static void register(CombatTracker tracker, CombatConfig config) {
 
+        // ServerPlayer overrides die without calling LivingEntity.die. Clear
+        // the tag through Fabric's player-aware event before a respawn/logout.
+        ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
+            if (entity instanceof ServerPlayer) tracker.handleEntityDeath(entity);
+        });
+
         ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
+            if (source.getEntity() instanceof ServerPlayer attacker
+                    && !Combatpersistence.authManager.isAuthenticated(attacker)) return false;
             if (entity instanceof ServerPlayer victim) {
                 if (!Combatpersistence.authManager.isAuthenticated(victim)) return false;
 
@@ -139,12 +146,6 @@ public class CombatEvents {
 
             joinTimes.put(uuid, System.currentTimeMillis());
 
-            boolean wasOfflineKilled = tracker.checkAndClearOfflineDeath(uuid);
-            if (wasOfflineKilled) {
-                player.getInventory().clearContent();
-                // tracker.markOfflineDeath already adds to tracker's pending deaths
-            }
-
             if (Combatpersistence.authManager.authRequired(server)) {
                 if (Combatpersistence.authManager.checkAutoLogin(player)) {
                     player.sendSystemMessage(Component.literal("§aWelcome back! Autologin session verified."));
@@ -152,25 +153,11 @@ public class CombatEvents {
                     // onAuthenticated handles pending death, pre-auth inventory restore
                     // and combat-NPC cleanup together in the correct order. Calling them
                     // separately here too would double-restore and risk dupes/loss.
-                    Combatpersistence.authManager.onAuthenticated(player);
+                    if (!Combatpersistence.authManager.onAuthenticated(player)) return;
 
                     String skin = Combatpersistence.authManager.getCustomSkin(uuid);
                     SkinManager.applySkin(player, skin != null ? skin : player.getName().getString());
                 } else {
-                    player.setNoGravity(true);
-                    player.setInvulnerable(true);
-
-                    // Hide the inventory from the client until the password is verified, so
-                    // an impostor sharing this offline UUID can't see the real owner's items.
-                    if (config.hideInventoryBeforeAuth) {
-                        Combatpersistence.authManager.stashInventory(player);
-                    }
-
-                    if (config.hideCoordinatesBeforeAuth) {
-                        Combatpersistence.authManager.saveLocation(player);
-                        teleportToLobby(server, player, config);
-                    }
-
                     if (Combatpersistence.authManager.isRegistered(uuid)) {
                         player.sendSystemMessage(Component.literal(config.loginPrompt));
                     } else {
@@ -183,11 +170,14 @@ public class CombatEvents {
                 // auth off can never strand a player's items in the pending-inventory
                 // file or leave them floating and invulnerable from a pre-auth join.
                 player.setNoGravity(false);
-                player.setInvulnerable(false);
-                Combatpersistence.authManager.restorePreAuthInventory(player);
-                cleanUpNpc(player, tracker, server);
-                // If no auth, handle pending death immediately
-                handlePendingDeath(player);
+                player.setPermanentlyInvulnerable(false);
+                Combatpersistence.authManager.restoreLocation(player);
+                if (tracker.isPendingDeath(uuid)) {
+                    handlePendingDeath(player);
+                } else {
+                    Combatpersistence.authManager.restorePreAuthInventory(player);
+                    cleanUpNpc(player, tracker, server);
+                }
 
                 // If this is an offline server, apply the skin (online servers do this automatically)
                 if (!server.usesAuthentication()) {
@@ -262,6 +252,35 @@ public class CombatEvents {
         });
     }
 
+    /** Protect persisted player state before vanilla builds any initial play packet. */
+    public static void preparePlayerJoin(ServerPlayer player, MinecraftServer server) {
+        CombatConfig config = Combatpersistence.config;
+        if (!Combatpersistence.authManager.authRequired(server)) return;
+        player.setNoGravity(true);
+        player.setPermanentlyInvulnerable(true);
+        if (Combatpersistence.tracker.isPendingDeath(player.getUUID())
+                || Combatpersistence.tracker.getNPCForPlayer(player.getUUID()) != null) {
+            SlottedInventory.clearLiveInventory(player);
+            if (!Combatpersistence.tracker.isPendingDeath(player.getUUID())) {
+                // The combat snapshot already owns every item. Never create a
+                // second nonempty stash from a stale player.dat after a crash.
+                Combatpersistence.authManager.discardPreAuthInventory(player.getUUID());
+            }
+        }
+        // The JOIN event runs after inventory and position packets. Stash here,
+        // even for optional autologin; only the completed JOIN may restore state.
+        if (config.hideInventoryBeforeAuth) Combatpersistence.authManager.stashInventory(player);
+        if (config.hideCoordinatesBeforeAuth) {
+            Combatpersistence.authManager.saveLocation(player);
+            ServerLevel lobby = server.getLevel(config.lobbyDimensionKey());
+            if (lobby == null) throw new IllegalStateException("Authentication lobby dimension is unavailable");
+            player.setServerLevel(lobby);
+            player.snapTo(config.lobbyX, config.lobbyY, config.lobbyZ, 0, 0);
+            player.setDeltaMovement(Vec3.ZERO);
+            player.resetFallDistance();
+        }
+    }
+
     /**
      * Disconnect handling, called from PlayerListRemoveMixin at the HEAD of
      * PlayerList.remove(ServerPlayer) — guaranteed main thread and guaranteed
@@ -303,7 +322,19 @@ public class CombatEvents {
                     Combatpersistence.debug("Snapshot for {}: {} items ({} main, {} armor, {} offhand, {} cursor/crafting)",
                         player.getName().getString(), fullInv.size(), main, armor, offhand, slotless);
 
-                    CombatNPC npc = CombatNPC.spawn(player, fullInv);
+                    CombatNPC npc;
+                    try {
+                        npc = CombatNPC.spawn(player, fullInv);
+                    } finally {
+                        // Even an entity-load callback can fail after addNPC
+                        // commits the snapshot. Never let vanilla close the
+                        // menu and drop a second copy of its tracked inputs.
+                        if (tracker.getNPCForPlayer(uuid) != null) {
+                            SlottedInventory.clearLiveInventory(player);
+                            if (player.containerMenu != player.inventoryMenu) player.closeContainer();
+                            Combatpersistence.debug("Cleared live inventory of {} after snapshot", player.getName().getString());
+                        }
+                    }
                     if (npc != null) {
                         Combatpersistence.LOGGER.info("Successfully initiated CombatNPC for {}. NPC UUID: {}",
                             player.getName().getString(), npc.getUUID());
@@ -315,11 +346,7 @@ public class CombatEvents {
                     // disk (addNPC saves synchronously inside spawn). Vanilla
                     // writes player.dat right after this hook returns, so it
                     // saves the emptied inventory.
-                    if (tracker.getNPCForPlayer(uuid) != null) {
-                        player.getInventory().clearContent();
-                        player.containerMenu.setCarried(ItemStack.EMPTY);
-                        Combatpersistence.debug("Cleared live inventory of {} after snapshot", player.getName().getString());
-                    } else {
+                    if (tracker.getNPCForPlayer(uuid) == null) {
                         Combatpersistence.LOGGER.error(
                             "No durable tracker entry for {} after NPC spawn — live inventory NOT cleared",
                             player.getName().getString());
@@ -353,9 +380,11 @@ public class CombatEvents {
     public static void handlePendingDeath(ServerPlayer player) {
         if (Combatpersistence.tracker.isPendingDeath(player.getUUID())) {
             Combatpersistence.debug("Executing pending combat-log death for {} on join", player.getName().getString());
-            player.getInventory().clearContent();
+            Combatpersistence.authManager.discardPreAuthInventory(player.getUUID());
+            SlottedInventory.clearLiveInventory(player);
             player.setHealth(0.0f);
             player.die(player.level().damageSources().generic());
+            PlayerDataPersistence.save(player);
             Combatpersistence.tracker.removePendingDeath(player.getUUID());
         }
     }

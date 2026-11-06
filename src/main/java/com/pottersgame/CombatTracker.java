@@ -6,7 +6,6 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.item.ItemStack;
 
 import java.io.*;
 import java.lang.reflect.Type;
@@ -15,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class CombatTracker {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final File DATA_FILE = new File(FabricLoader.getInstance().getConfigDir().toFile(), "combat_persistence_data.json");
+    private final File DATA_FILE;
 
     private final Map<UUID, Long> combatEndTimes = new ConcurrentHashMap<>();
     private final Map<UUID, ActiveNPCData> activeNPCs = new ConcurrentHashMap<>();
@@ -23,6 +22,11 @@ public class CombatTracker {
     private final Set<UUID> pendingJoinDeaths = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     public CombatTracker() {
+        this(FabricLoader.getInstance().getConfigDir());
+    }
+
+    CombatTracker(java.nio.file.Path directory) {
+        DATA_FILE = directory.resolve("combat_persistence_data.json").toFile();
         loadData();
     }
 
@@ -58,11 +62,18 @@ public class CombatTracker {
 
     public void addNPC(UUID playerUuid, UUID npcUuid, List<SlottedInventory.SlottedStack> inventory, ServerLevel world) {
         ActiveNPCData data = new ActiveNPCData(playerUuid, npcUuid, inventory, world);
-        activeNPCs.put(playerUuid, data);
+        if (activeNPCs.putIfAbsent(playerUuid, data) != null) {
+            throw new IllegalStateException("An inventory snapshot already exists for this player");
+        }
         // Synchronous: the caller clears the player's live inventory right after
         // this, and vanilla then writes the emptied player.dat. If the server dies
         // before this snapshot reaches the disk, the items exist nowhere.
-        saveData(false);
+        try {
+            saveData(false);
+        } catch (RuntimeException error) {
+            activeNPCs.remove(playerUuid, data);
+            throw error;
+        }
         Combatpersistence.debug("Tracker entry for {} persisted synchronously ({} items, NPC {})",
             playerUuid, data.items.size(), npcUuid);
     }
@@ -80,29 +91,46 @@ public class CombatTracker {
     }
 
     public void removeNPC(UUID playerUuid) {
-        activeNPCs.remove(playerUuid);
-        saveData();
+        getAndRemoveNPCData(playerUuid);
     }
 
     public ActiveNPCData getAndRemoveNPCData(UUID playerUuid) {
         ActiveNPCData data = activeNPCs.remove(playerUuid);
         if (data != null) {
-            saveData();
+            try {
+                saveData(false);
+            } catch (RuntimeException error) {
+                activeNPCs.put(playerUuid, data);
+                throw error;
+            }
         }
         return data;
     }
 
     public void markOfflineDeath(UUID playerUuid) {
-        offlineDeaths.add(playerUuid);
-        pendingJoinDeaths.add(playerUuid);
-        activeNPCs.remove(playerUuid);
-        saveData();
+        boolean addedDeath = offlineDeaths.add(playerUuid);
+        boolean addedPending = pendingJoinDeaths.add(playerUuid);
+        ActiveNPCData removed = activeNPCs.remove(playerUuid);
+        try {
+            // A durable tombstone must exist before any item becomes loot.
+            saveData(false);
+        } catch (RuntimeException error) {
+            if (addedDeath) offlineDeaths.remove(playerUuid);
+            if (addedPending) pendingJoinDeaths.remove(playerUuid);
+            if (removed != null) activeNPCs.put(playerUuid, removed);
+            throw error;
+        }
         Combatpersistence.debug("Marked offline combat-log death for {} (tracker entry removed; they die on next join)", playerUuid);
     }
 
     public boolean checkAndClearOfflineDeath(UUID playerUuid) {
         if (offlineDeaths.remove(playerUuid)) {
-            saveData();
+            try {
+                saveData(false);
+            } catch (RuntimeException error) {
+                offlineDeaths.add(playerUuid);
+                throw error;
+            }
             return true;
         }
         return false;
@@ -113,8 +141,15 @@ public class CombatTracker {
     }
 
     public void removePendingDeath(UUID uuid) {
-        if (pendingJoinDeaths.remove(uuid)) {
-            saveData();
+        boolean hadOfflineDeath = offlineDeaths.remove(uuid);
+        if (pendingJoinDeaths.remove(uuid) || hadOfflineDeath) {
+            try {
+                saveData(false);
+            } catch (RuntimeException error) {
+                pendingJoinDeaths.add(uuid);
+                if (hadOfflineDeath) offlineDeaths.add(uuid);
+                throw error;
+            }
         }
     }
 
@@ -129,39 +164,9 @@ public class CombatTracker {
             return;
         }
 
-        if (entity instanceof CombatNPC npc) {
-            List<ItemStack> inventory = npc.getStoredInventory();
-            if (!inventory.isEmpty()) {
-                int count = inventory.size();
-                for (ItemStack stack : inventory) {
-                    entity.spawnAtLocation((ServerLevel) entity.level(), stack);
-                }
-                // The death mixin injects at HEAD of LivingEntity.die — BEFORE
-                // vanilla's re-entry guard — so die() can run through here twice
-                // (e.g. /kill on a dying entity). Clear the list so a second pass
-                // can't drop the whole inventory again.
-                inventory.clear();
-                Combatpersistence.debug("CombatNPC of {} died at {}: dropped {} stored items",
-                    npc.originalPlayerName, entity.blockPosition(), count);
-            } else {
-                for (ActiveNPCData data : activeNPCs.values()) {
-                    if (data.npcUuid.equals(entityUuid)) {
-                        dropNpcInventory(entity, data);
-                        break;
-                    }
-                }
-            }
-            
-            if (npc.originalPlayerUuid != null) {
-                markOfflineDeath(npc.originalPlayerUuid);
-            }
-            return;
-        }
-
         for (ActiveNPCData data : activeNPCs.values()) {
             if (data.npcUuid.equals(entityUuid)) {
                 dropNpcInventory(entity, data);
-                markOfflineDeath(data.playerUuid);
                 return;
             }
         }
@@ -169,16 +174,24 @@ public class CombatTracker {
 
     private void dropNpcInventory(Entity entity, ActiveNPCData data) {
         if (entity.level() instanceof ServerLevel world) {
-            int count = 0;
-            for (SlottedInventory.SlotItem item : data.items) {
-                ItemStack stack = SlottedInventory.decode(world, item.nbt);
-                if (stack != null && !stack.isEmpty()) {
-                    entity.spawnAtLocation(world, stack);
-                    count++;
-                }
+            SlottedInventory.DecodeResult decoded = SlottedInventory.decodeAll(world, data.items);
+            if (decoded.failures() != 0) {
+                Combatpersistence.LOGGER.error("NPC inventory cannot be decoded; keeping its recovery snapshot for {}", data.playerUuid);
+                return;
             }
+            try {
+                // The death mixin runs before vanilla's re-entry guard. Remove
+                // the authoritative entry synchronously before exposing loot so
+                // a second die() call or crash cannot restore the same items.
+                markOfflineDeath(data.playerUuid);
+            } catch (RuntimeException error) {
+                Combatpersistence.LOGGER.error("Could not commit NPC death; withholding loot for {}", data.playerUuid, error);
+                return;
+            }
+            if (entity instanceof CombatNPC npc) npc.getStoredInventory().clear();
+            for (SlottedInventory.SlottedStack item : decoded.items()) entity.spawnAtLocation(world, item.stack());
             Combatpersistence.debug("Dropped {} tracker-stored items for {} at {} (fallback drop path)",
-                count, data.playerUuid, entity.blockPosition());
+                decoded.items().size(), data.playerUuid, entity.blockPosition());
         }
     }
 
@@ -187,21 +200,11 @@ public class CombatTracker {
     }
 
     public void saveData(boolean async) {
-        Set<UUID> deathsCopy = new HashSet<>(offlineDeaths);
-        Set<UUID> pendingCopy = new HashSet<>(pendingJoinDeaths);
-        Map<UUID, ActiveNPCData> npcsCopy = new HashMap<>(activeNPCs);
-
-        Runnable saveAction = () -> {
-            try (FileWriter writer = new FileWriter(DATA_FILE)) {
-                JsonObject root = new JsonObject();
-                root.add("offlineDeaths", GSON.toJsonTree(deathsCopy));
-                root.add("pendingJoinDeaths", GSON.toJsonTree(pendingCopy));
-                root.add("activeNPCs", GSON.toJsonTree(npcsCopy));
-                GSON.toJson(root, writer);
-            } catch (IOException e) {
-                Combatpersistence.LOGGER.error("Failed to save combat data", e);
-            }
-        };
+        JsonObject root = new JsonObject();
+        root.add("offlineDeaths", GSON.toJsonTree(offlineDeaths));
+        root.add("pendingJoinDeaths", GSON.toJsonTree(pendingJoinDeaths));
+        root.add("activeNPCs", GSON.toJsonTree(activeNPCs));
+        Runnable saveAction = () -> DiskIO.writeJson(DATA_FILE, GSON, root);
 
         if (async) {
             DiskIO.async(saveAction);
@@ -218,25 +221,38 @@ public class CombatTracker {
         if (DATA_FILE.exists()) {
             try (FileReader reader = new FileReader(DATA_FILE)) {
                 JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+                if (!root.has("offlineDeaths") || !root.get("offlineDeaths").isJsonArray()
+                        || !root.has("activeNPCs") || !root.get("activeNPCs").isJsonObject()) {
+                    throw new IllegalStateException("Missing combat recovery collections");
+                }
                 if (root.has("offlineDeaths")) {
                     Type setType = new TypeToken<HashSet<UUID>>(){}.getType();
                     offlineDeaths = GSON.fromJson(root.get("offlineDeaths"), setType);
+                    if (offlineDeaths == null || offlineDeaths.contains(null)) throw new IllegalStateException("Invalid offline death data");
                 }
                 if (root.has("pendingJoinDeaths")) {
                     Type setType = new TypeToken<HashSet<UUID>>(){}.getType();
                     Set<UUID> loaded = GSON.fromJson(root.get("pendingJoinDeaths"), setType);
-                    if (loaded != null) pendingJoinDeaths.addAll(loaded);
+                    if (loaded == null || loaded.contains(null)) throw new IllegalStateException("Invalid pending death data");
+                    pendingJoinDeaths.addAll(loaded);
                 }
                 if (root.has("activeNPCs")) {
                     Type mapType = new TypeToken<ConcurrentHashMap<UUID, ActiveNPCData>>(){}.getType();
                     Map<UUID, ActiveNPCData> loaded = GSON.fromJson(root.get("activeNPCs"), mapType);
-                    if (loaded != null) {
-                        loaded.values().forEach(CombatTracker::normalizeLoadedEntry);
-                        activeNPCs.putAll(loaded);
-                    }
+                    if (loaded == null) throw new IllegalStateException("Invalid combat inventory data");
+                    Set<UUID> npcUuids = new HashSet<>();
+                    loaded.forEach((uuid, data) -> {
+                        if (uuid == null || data == null || !uuid.equals(data.playerUuid) || data.npcUuid == null
+                                || !npcUuids.add(data.npcUuid) || offlineDeaths.contains(uuid) || pendingJoinDeaths.contains(uuid)) {
+                            throw new IllegalStateException("Invalid combat inventory owner or NPC identifier");
+                        }
+                        normalizeLoadedEntry(data);
+                    });
+                    activeNPCs.putAll(loaded);
                 }
+                pendingJoinDeaths.addAll(offlineDeaths);
             } catch (Exception e) {
-                Combatpersistence.LOGGER.error("Failed to load combat data", e);
+                throw new IllegalStateException("Refusing to start with unreadable combat recovery data", e);
             }
         }
     }
@@ -250,14 +266,16 @@ public class CombatTracker {
      */
     private static void normalizeLoadedEntry(ActiveNPCData data) {
         if (data.items == null) {
+            if (data.inventoryNbt == null) throw new IllegalStateException("Missing combat inventory snapshot");
             data.items = new ArrayList<>();
-            if (data.inventoryNbt != null) {
-                for (String b64 : data.inventoryNbt) {
-                    data.items.add(new SlottedInventory.SlotItem(SlottedInventory.NO_SLOT, b64));
-                }
-                Combatpersistence.LOGGER.info("Migrated legacy combat data entry for {} ({} items, restored slotless)",
-                    data.playerUuid, data.items.size());
+            for (String b64 : data.inventoryNbt) {
+                data.items.add(new SlottedInventory.SlotItem(SlottedInventory.NO_SLOT, b64));
             }
+            org.slf4j.LoggerFactory.getLogger("combatpersistence").info("Migrated legacy combat data entry for {} ({} items, restored slotless)",
+                data.playerUuid, data.items.size());
+        }
+        for (SlottedInventory.SlotItem item : data.items) {
+            if (item == null || item.nbt == null) throw new IllegalStateException("Invalid combat inventory item");
         }
         data.inventoryNbt = null;
     }
@@ -296,31 +314,30 @@ public class CombatTracker {
         ServerLevel world = player.level();
         SlottedInventory.DecodeResult decoded = SlottedInventory.decodeAll(world, data.items);
 
-        // Full decode success makes this snapshot authoritative: wipe the live
-        // inventory first (killing any stale player.dat copy left by an old
-        // dupe or crash window) and put every item back in its exact slot. On
-        // any decode failure keep whatever the player is holding and restore
-        // additively instead — prefer a dupe over item loss.
-        boolean clearFirst = decoded.failures() == 0;
-        if (!clearFirst) {
-            Combatpersistence.LOGGER.warn(
-                "{} of {} stored items failed to decode for {} — restoring additively, live inventory NOT cleared (prefer dupe over loss)",
-                decoded.failures(), data.items.size(), player.getName().getString());
+        // Never add a partial recovery snapshot on top of a stale player.dat.
+        // Leave the durable backup untouched for staff repair on any failure.
+        if (decoded.failures() != 0) {
+            throw new IllegalStateException("Combat recovery inventory could not be decoded; snapshot retained");
         }
 
-        SlottedInventory.PlaceResult result = SlottedInventory.place(player, decoded.items(), clearFirst);
+        SlottedInventory.PlaceResult result = SlottedInventory.place(player, decoded.items(), true);
         Combatpersistence.debug(
             "Restored combat-log inventory for {}: {} items ({} exact slot of which {} equipment, {} loose, {} dropped), clearedFirst={}",
             player.getName().getString(), decoded.items().size(),
-            result.exact(), result.equipped(), result.loose(), result.dropped(), clearFirst);
+            result.exact(), result.equipped(), result.loose(), result.dropped(), true);
 
         player.sendSystemMessage(net.minecraft.network.chat.Component.literal(Combatpersistence.config.inventoryRestoredMessage));
 
-        // Only drop the tracker entry once the items are back in the live
-        // inventory, and persist that removal synchronously — same prefer-no-loss
-        // ordering as the pre-auth stash. Removing first meant a crash mid-restore
-        // destroyed the only durable copy of the items.
+        // Commit player.dat before consuming its recovery snapshot. Overflow is
+        // withheld until consumption commits, so retries cannot duplicate loot.
+        PlayerDataPersistence.save(player);
         activeNPCs.remove(player.getUUID());
-        saveData(false);
+        try {
+            saveData(false);
+        } catch (RuntimeException error) {
+            activeNPCs.put(player.getUUID(), data);
+            throw error;
+        }
+        result.dropOverflow(player);
     }
 }

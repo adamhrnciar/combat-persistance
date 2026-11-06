@@ -77,11 +77,14 @@ public class CombatConfig {
     public boolean kickOnWrongPassword = true;
     // BCrypt silently truncates passwords beyond 72 bytes, so the maximum stays
     // safely below that.
-    public int minPasswordLength = 4;
+    public int minPasswordLength = 8;
     public int maxPasswordLength = 64;
     // Cooldown between /skin uses, so one player can't burn the server's shared
     // Mojang API rate limit by spamming lookups of unique names.
     public int skinCommandCooldownSeconds = 30;
+    // External skin lookups disclose the requested name/UUID and server IP to
+    // Mojang. Administrators must explicitly enable this optional feature.
+    public boolean enableSkinLookups = false;
     public boolean hideCoordinatesBeforeAuth = true;
     public boolean hideInventoryBeforeAuth = true;
     public double lobbyX = 0, lobbyY = 1000, lobbyZ = 0;
@@ -118,6 +121,7 @@ public class CombatConfig {
             try (FileReader reader = new FileReader(CONFIG_FILE)) {
                 CombatConfig loaded = GSON.fromJson(reader, CombatConfig.class);
                 if (loaded != null) {
+                    loaded.validate();
                     return loaded;
                 }
                 Combatpersistence.LOGGER.warn("Combat config file is empty, regenerating defaults");
@@ -143,5 +147,57 @@ public class CombatConfig {
                 Combatpersistence.LOGGER.error("Failed to save combat config in background", e);
             }
         });
+    }
+
+    /** Keep malformed optional settings from disabling packet and login guards. */
+    void validate() {
+        CombatConfig defaults = new CombatConfig();
+        try {
+            for (java.lang.reflect.Field field : CombatConfig.class.getFields()) {
+                if (field.getType() == String.class && field.get(this) == null) {
+                    field.set(this, field.get(defaults));
+                }
+            }
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Cannot validate combat configuration", e);
+        }
+        combatTagDurationSeconds = bounded(combatTagDurationSeconds, 1, 86400, defaults.combatTagDurationSeconds);
+        sessionDurationHours = bounded(sessionDurationHours, 1, 168, defaults.sessionDurationHours);
+        maxLoginAttempts = bounded(maxLoginAttempts, 1, 100, defaults.maxLoginAttempts);
+        loginLockoutSeconds = bounded(loginLockoutSeconds, 1, 86400, defaults.loginLockoutSeconds);
+        minPasswordLength = bounded(minPasswordLength, 1, 64, defaults.minPasswordLength);
+        maxPasswordLength = bounded(maxPasswordLength, minPasswordLength, 64, 64);
+        authTimeoutSeconds = bounded(authTimeoutSeconds, 1, 600, defaults.authTimeoutSeconds);
+        skinCommandCooldownSeconds = bounded(skinCommandCooldownSeconds, 1, 86400, defaults.skinCommandCooldownSeconds);
+        if (!Double.isFinite(lobbyX) || Math.abs(lobbyX) > 29999984) lobbyX = defaults.lobbyX;
+        if (!Double.isFinite(lobbyY) || Math.abs(lobbyY) > 20000000) lobbyY = defaults.lobbyY;
+        if (!Double.isFinite(lobbyZ) || Math.abs(lobbyZ) > 29999984) lobbyZ = defaults.lobbyZ;
+        blockedCommands = blockedCommands == null ? defaults.blockedCommands :
+            new ArrayList<>(blockedCommands.stream().filter(java.util.Objects::nonNull)
+                .map(String::strip).filter(s -> !s.isEmpty()).toList());
+        validateFormats(defaults);
+    }
+
+    private void validateFormats(CombatConfig defaults) {
+        String[] formatted = {"combatMessage", "npcDeathBroadcast", "passwordTooShort", "passwordTooLong",
+            "skinAppliedMessage", "skinCooldownMessage", "accountResetSuccess", "accountResetNotRegistered",
+            "loginLockedOutMessage"};
+        for (String name : formatted) {
+            try {
+                java.lang.reflect.Field field = CombatConfig.class.getField(name);
+                try {
+                    String.format((String) field.get(this), "value");
+                } catch (java.util.IllegalFormatException e) {
+                    field.set(this, field.get(defaults));
+                    Combatpersistence.LOGGER.warn("Invalid format for configuration field {}; using default", name);
+                }
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("Cannot validate message format", e);
+            }
+        }
+    }
+
+    private static int bounded(int value, int minimum, int maximum, int fallback) {
+        return value >= minimum && value <= maximum ? value : fallback;
     }
 }

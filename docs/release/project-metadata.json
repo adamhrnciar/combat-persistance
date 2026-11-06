@@ -1,0 +1,15 @@
+{
+  "title": "Combat Persistence",
+  "description": "Server-side Fabric combat logging protection for PvP and SMP: offline NPCs, inventory recovery, combat command blocking and optional offline-mode login.",
+  "categories": ["management", "utility"],
+  "additional_categories": ["game-mechanics"],
+  "issues_url": "https://github.com/adamhrnciar/combat-persistance/issues",
+  "source_url": "https://github.com/adamhrnciar/combat-persistance",
+  "donation_urls": [
+    {
+      "id": "ko-fi",
+      "platform": "Ko-fi",
+      "url": "https://ko-fi.com/pottersgame"
+    }
+  ]
+}

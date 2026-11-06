@@ -1,107 +1,78 @@
-# Combat Persistence 🛡️
+# Combat Persistence
 
-**Combat Persistence** is a professional-grade, **100% server-side** Fabric mod for competitive Minecraft servers. It kills combat logging by spawning a vulnerable NPC whenever a player disconnects mid-fight — so closing the game is never an escape. It also ships a hardened, built-in authentication system to lock down offline-mode and cracked servers.
+**Combat logging protection for Fabric PvP and SMP servers. No client mod required.**
 
-> No client install required. Your players just connect and play.
+When a tagged player disconnects, Combat Persistence leaves a vulnerable mannequin at their location for the remaining combat tag. Opponents can finish the fight. If the mannequin dies, its inventory drops and the player dies when they return.
 
----
+## Combat logging protection
 
-## ⚔️ Combat Logging Protection
+- **PvP combat tags:** configurable duration, with remaining time in the action bar.
+- **Offline mannequins:** copy the player's equipment and available skin while the combat tag remains active.
+- **Inventory recovery:** disk snapshots retain inventory, equipment, cursor items and owned vanilla menu inputs for the next login if the mannequin disappears during a restart or chunk unload. Result previews and shared containers stay excluded.
+- **Offline death:** committing a death record prevents the same tracked inventory from being released again.
+- **Combat command blocking:** configure commands such as `/home`, `/spawn` and `/tp`. Add aliases used by your server.
+- **Optional ender chest restriction:** disable ender chests server-wide for arena or SMP rules.
 
-- **Smart Combat Tagging** — Players are tagged only on genuine PvP damage. Configurable duration with live action-bar feedback.
-- **Persistent NPCs** — Disconnecting while tagged spawns a `Mannequin` NPC at your exact location that mirrors your **skin, armor, and held items**.
-- **Survives Anything** — The player's inventory is written to disk the instant the NPC spawns, so it survives chunk unloads, restarts, and crashes; items are always restored on the player's next join.
-- **Reliable Offline Deaths** — If your NPC is slain while you're away, you rejoin straight to the death screen. No ghost items, no survival glitches.
-- **Advanced Dupe Protection** — Clears both the inventory **and the cursor stack** the instant you disconnect, closing the duplication exploits that plague other combat-log mods.
-- **Command Blocking** — Stop players escaping a fight with `/tp`, `/home`, `/spawn`, `/warp`, `/back`, and any custom commands you add. Namespaced forms (`/minecraft:tp`) and the signed command packet path are covered too.
+The mannequin entity itself is not saved in chunks. Inventory recovery persists separately. Restarting the server does not recreate the offline fight.
 
-## 🔐 Built-in Secure Authentication
+## Optional offline-mode authentication
 
-- **BCrypt password hashing** — Passwords are never stored in plaintext.
-- **Inventory & coordinate hiding** — Until a player logs in, their inventory and location are concealed, so nobody joining under their name (a real risk in offline mode) can peek at their items or position.
-- **Brute-force lockout** — A wrong password kicks the player on the spot; too many failures lock the account *and* the attacking IP, refusing the connection at join until the cooldown expires.
-- **Operator account reset** — `/authreset <player>` lets staff wipe a forgotten/compromised account so the player can re-register.
-- **Conservative IP auto-login** — Optional and **off by default** (IP auto-login is weak behind shared NAT / BungeeCord / Velocity proxies). Enable only on trusted direct-connect servers.
-- **Safe limbo** — Unauthenticated players are held in a lobby with hidden coordinates to prevent world-leaking.
+Online-mode servers use Minecraft account verification. The built-in password flow applies to offline-mode servers when enabled.
 
-## 🪓 Arena / SMP Extras
+- BCrypt password hashes, with bounded password verification work.
+- Inventory, position and last-death coordinates hidden before initial play packets when their protection settings are enabled.
+- Authentication tied to the current connection.
+- Duplicate UUID and case-insensitive name checks that reject the newcomer before replacing an existing connection.
+- Login timeout, failed-attempt lockout and an operator account reset command.
+- IP autologin disabled by default.
 
-- **Ender chest toggle** — Optionally disable ender chests server-wide (reliably blocked via mixin) so players can't stash loot mid-fight on arena/SMP setups.
+**Use online mode for public servers where possible.** This mod does not encrypt offline-mode network traffic. Password commands require an independently secured connection; never reuse an important password. First registration of an offline name does not prove ownership. Whitelist existing players and arrange registration with them.
 
----
+## Installation
 
-## 🆕 What's New in 1.9.0
+1. Use a dedicated Minecraft **26.3** server with **Java 25 or later**.
+2. Install **Fabric Loader 0.20.1 or later** and the **Fabric API build for Minecraft 26.3**.
+3. Download the Combat Persistence version marked for **26.3** and put its JAR in the server's `mods` folder.
+4. Start the server, then configure `config/combatpersistence.json`.
+5. Test combat logout, reconnect and recovery on a disposable world before using your existing world.
 
-- 🩹 **Fixed armor unequipping on combat-log rejoin** — inventory snapshots now record each item's slot; armor and offhand go back on the body and every item returns to its exact slot.
-- 🧬 **Fixed a major item-duplication exploit** — on a hard disconnect (the real combat-log case) the inventory clear raced vanilla's player save on another thread, so players could rejoin with their items *plus* a full dropped copy. Disconnect handling now runs on the main thread, strictly before the player file is written.
-- 🛑 **Fixed a guaranteed dupe on `/stop`** — server shutdown no longer spawns combat NPCs; tagged players simply keep their items across the restart.
-- 🧷 **Authoritative restore** — when every stored item decodes, the restore wipes stale live copies before placing items back, collapsing any historical dupes into a single inventory. On any decode failure it falls back to an additive restore — items are never lost.
-- 🔎 **New `debugLogging` config** — verbose production diagnostics for snapshots, restores and NPC lifecycle (thread names, per-restore outcome counts). Errors always log regardless.
-- 📦 **Data format upgrade** — combat and pre-auth inventory files now store slot indices; old files migrate automatically on first boot (legacy entries restore slotless, nothing is lost). Downgrading to 1.8.x after 1.9.0 has written data is not supported.
+Players need no client installation. Use the version selector for older Minecraft releases; compatibility labels apply to each uploaded version.
 
-## 🗒️ What's New in 1.8.0
+## Useful settings
 
-- 🚨 **Fixed online-mode servers** — auth correctly never applies there; players were previously frozen, blocked, and kicked with "Login timeout".
-- 🧰 **Fixed open-container theft** — disconnecting in combat with a chest open no longer pulls the chest's contents into the combat-log NPC.
-- 🔒 **Harder brute-force protection** — a wrong `/login` password kicks the player; lockouts now also track the attacking IP and refuse the connection at join until the cooldown expires.
-- 🛡️ **Closed command bypasses** — blocked/pre-auth commands are also caught on the signed command packet path and in namespaced form (`/minecraft:tp`).
-- 💾 **Crash-safe data** — all saves go through one serialized writer (no stale-snapshot overwrites), critical snapshots flush synchronously, auth data flushes on shutdown, and a corrupt config no longer crashes startup.
-- 🧪 **Dupe & loss fixes** — NPC double-death drops closed; NPC inventory persisted before the live copy is cleared; combat tags end on real deaths.
-- 🎨 **`/skin` reliability** — profile swap works in production builds, Mojang lookups are cached (including failures) and rate-limited with a per-player cooldown; IPv6 players get working IP auto-login.
-- 🔑 Minimum/maximum password length for `/register`.
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `combatTagDurationSeconds` | `15` | Time before a combat tag expires. |
+| `blockedCommands` | See generated config | Commands refused during combat. |
+| `disableEnderChests` | `false` | Disable ender chests server-wide. |
+| `enableAuth` | `true` | Enable the built-in offline-mode password flow. |
+| `forceAuthInOfflineMode` | `true` | Require the password flow in offline mode. |
+| `enableIpAutoLogin` | `false` | Allow password-free login from a matching recent address. Keep disabled for stronger protection. |
+| `hideInventoryBeforeAuth` | `true` | Hide inventory before login. |
+| `hideCoordinatesBeforeAuth` | `true` | Hide position and last-death coordinates before login. |
+| `enableSkinLookups` | `false` | Opt in to external Mojang skin requests. |
 
-## 🗒️ What's New in 1.7.0
+External skin requests disclose the requested name or UUID and the server's IP to Mojang. Clients may fetch the returned textures. This setting does not control requests made by Minecraft or other mods.
 
-- ✅ **Updated for Minecraft 26.2** (Java 25).
-- 🔒 Patched offline-mode identity exploits (premium-name bypass, inventory exposure, login-fall).
-- 🔑 Added operator account reset (`/authreset`) and hardened IP auto-login.
-- 🪓 Added a toggle to disable ender chests for arena/SMP servers, now reliably blocked via mixin.
-- 🛡️ Combat tags now trigger only on real player damage; skin identifiers are validated and Mojang fetches isolated from the common thread pool.
-- 🔐 Added brute-force login lockout.
+## Commands
 
-## ⌨️ Commands
+| Command | Purpose |
+| --- | --- |
+| `/register <password> <confirmPassword>` | Register an offline-mode account. |
+| `/login <password>` | Authenticate the current connection. |
+| `/skin <name>` | Request a Mojang skin when external lookups are enabled. |
+| `/authreset <player>` | Operator: reset an account for coordinated registration. |
 
-| Command | Description |
-| :--- | :--- |
-| `/register <password> <confirm>` | Register your account. |
-| `/login <password>` | Log in to your account. |
-| `/skin <name>` | Apply a skin from a Mojang account name. |
-| `/authreset <player>` | **(Operator)** Reset a player's account so they must register again. |
+## Recovery and compatibility
 
-## 🔧 Configuration
+Back up the world and player data together with the mod's authentication and recovery JSON files. Restrict access: these files contain password hashes, inventory contents and coordinates.
 
-Everything lives in `config/combatpersistence.json` and generates on first launch. Highlights:
+Recovery prevents repeated inventory releases where possible. A crash between committing a death and saving dropped world items can still lose loot. No transaction spans all player files, recovery files and world chunks. Custom inventories, proxy authentication and other mods' packets need separate compatibility testing.
 
-| Setting | Default | What it does |
-| :--- | :--- | :--- |
-| `combatTagDurationSeconds` | `15` | Length of the combat tag. |
-| `debugLogging` | `false` | Verbose combat-log/restore diagnostics for production debugging. |
-| `blockedCommands` | `/spawn, /home, /tp, /tpa, /warp, /back` | Commands disabled while tagged. |
-| `disableEnderChests` | `false` | Block ender chests server-wide (arena/SMP). |
-| `enableAuth` | `true` | Toggle the whole authentication system. |
-| `forceAuthInOfflineMode` | `true` | Require auth on offline-mode servers (auth never applies on online-mode servers — Mojang already verifies those identities). |
-| `enableIpAutoLogin` | `false` | Optional IP-based auto-login (use only on trusted servers). |
-| `maxLoginAttempts` / `loginLockoutSeconds` | `5` / `300` | Brute-force lockout threshold and cooldown. |
-| `sessionDurationHours` | `24` | How long an auto-login session lasts. |
-| `hideInventoryBeforeAuth` | `true` | Conceal inventory until login. |
-| `hideCoordinatesBeforeAuth` | `true` | Conceal coordinates until login. |
+See the [configuration and security notes](https://github.com/adamhrnciar/combat-persistance#security) and [security review](https://github.com/adamhrnciar/combat-persistance/blob/main/SECURITY_REVIEW.md) for scope and limitations.
 
-> All in-game messages are fully customizable (color codes supported).
+## Support development
 
-## 📦 Requirements
+Report reproducible bugs with your Minecraft version, mod version and relevant server log. Remove passwords, addresses and player data before sharing logs.
 
-- **Fabric Loader** + **Fabric API**
-- **Minecraft 26.2**
-- **Java 25+**
-
-## 💎 Why Combat Persistence?
-
-Built with an **exploit-first** mindset. We've manually patched duplication glitches (cursor stacks, inventory ghosting), offline-mode identity spoofing, and authentication bypasses that affect other similar mods. All data files are written through a serialized background writer — thread-safe and lag-free under load, with critical snapshots flushed synchronously before the only live copy is destroyed.
-
-## ❤️ Support
-
-If this mod helps your server, you can support development here: **[ko-fi.com/pottersgame](https://ko-fi.com/pottersgame)**
-
----
-
-[Source Code](https://github.com/adamhrnciar/combat-persistance) · [Issue Tracker](https://github.com/adamhrnciar/combat-persistance/issues) · [GPL-3.0 License](https://github.com/adamhrnciar/combat-persistance/blob/main/LICENSE)
+[Report an issue](https://github.com/adamhrnciar/combat-persistance/issues) · [Source code](https://github.com/adamhrnciar/combat-persistance) · [Support on Ko-fi](https://ko-fi.com/pottersgame)
