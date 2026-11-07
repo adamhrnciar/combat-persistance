@@ -1,6 +1,6 @@
 {
   "title": "Combat Persistence",
-  "description": "Server-side Fabric combat logging protection for PvP and SMP: offline NPCs, inventory recovery, combat command blocking and optional offline-mode login.",
+  "description": "Keep PvP fights fair: combat logging leaves a killable NPC with the player’s loot. Server-side Fabric protection for survival and PvP. No client mod needed.",
   "categories": ["management", "utility"],
   "additional_categories": ["game-mechanics"],
   "issues_url": "https://github.com/adamhrnciar/combat-persistance/issues",

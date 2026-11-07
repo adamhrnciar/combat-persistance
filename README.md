@@ -1,25 +1,52 @@
 # Combat Persistence
 
-Combat Persistence is a server-side Fabric mod for Minecraft PvP and SMP servers. When a tagged player disconnects, a vulnerable mannequin keeps the fight open for the remaining combat tag. Players need no client mod.
+**Keep PvP fights fair when players disconnect. A server-side Fabric anti-combat-logging mod for survival and PvP servers.**
 
-## Features
+A player leaves mid-fight. Their opponent still has a chance to finish it: Combat Persistence leaves a vulnerable NPC mannequin behind for the rest of the combat timer. If the mannequin dies, the player's items drop and the player dies when they return.
 
-*   **Combat Tagging**: Automatically tags players when they engage in PvP.
-*   **Persistent NPCs**: When a tagged player disconnects, a Mannequin NPC spawns at their location.
-    *   **Anti-Dupe**: Clears the player's inventory and cursor stack on logout to prevent duplication exploits.
-    *   **Visual Mirroring**: NPCs mirror the player's skin, armor, and held items.
-    *   **Persistence**: The player's inventory is persisted to disk the moment the NPC spawns, surviving chunk unloads, server restarts, and crashes. (The NPC *entity* is intentionally never written to chunk data — if it despawns with the world, the items are still restored to the player on their next join.)
-*   **Offline Death**: If the NPC is killed, the player's items drop and they will die upon rejoining the server.
-*   **Authentication System**:
-    *   **BCrypt Hashing**: Passwords are hashed, never stored in plaintext.
-    *   **Optional IP Autologin**: Disabled by default. When enabled, an address match within the configured window (default 24 hours) bypasses password entry. Shared NAT, VPNs and proxies make this unsafe.
-    *   **Brute-Force Lockout**: A wrong `/login` password kicks the player; after too many failed attempts the account — and the attacking IP — is locked and refused at join until the lockout expires.
-    *   **Inventory Protection**: Hides inventory, position, and last-death coordinates before the initial play packets. Authentication applies to one connection, so a reconnect cannot inherit another connection's login.
-    *   **Operator Reset**: `/authreset <player>` lets staff wipe a forgotten or compromised account.
-    *   **Lobby Support**: Teleports unauthenticated players to a safe lobby dimension.
-*   **Arena/SMP Tools**: Optionally disable ender chests server-wide (blocked via mixin).
-*   **Command Blocking**: Configurable list of commands blocked while in combat.
-*   **Server-Side**: No client-side installation required.
+**Install on your server only. Players need no client mod.**
+
+[**Download on Modrinth**](https://modrinth.com/mod/combat-persistence/versions) · [Configuration](#configuration) · [Report a bug](https://github.com/adamhrnciar/combat-persistance/issues)
+
+Current release: **1.10.0** for **Minecraft 26.3**, **Fabric Loader 0.20.1+** and **Java 25+**. Requires **Fabric API**.
+
+## How combat logging protection works
+
+1. **Players fight.** PvP damage tags both players. The action bar shows the remaining time; the default tag lasts 15 seconds.
+2. **A tagged player disconnects.** A mannequin stays at their location, wearing their equipment and available skin.
+3. **The fight can continue.** Killing the mannequin drops the tracked items and records a death for the player's return.
+4. **The player returns.** If the mannequin survived, the saved inventory is restored. The mannequin disappears when the tag expires.
+
+Only PvP damage starts a combat tag. Mob attacks and environmental damage do not. A connection loss during combat follows the same rules as deliberately logging out.
+
+## Installation
+
+1.  Use a Minecraft **26.3** dedicated server with **Java 25 or later** and **Fabric Loader 0.20.1 or later**.
+2.  Download the matching release from [Modrinth](https://modrinth.com/mod/combat-persistence/versions).
+3.  Place the `.jar` and [Fabric API for Minecraft 26.3](https://modrinth.com/mod/fabric-api/versions?g=26.3) in your server's `mods` folder.
+4.  Start the server, review `config/combatpersistence.json`, and test recovery on a disposable world before migration.
+
+Use Modrinth's version selector for older Minecraft releases. Each release supports only its listed game versions.
+
+## Server rules you control
+
+- **Combat timer and messages:** choose the tag duration, action bar text, NPC name prefix and death announcement.
+- **Combat command blocking:** block escapes such as `/home`, `/spawn` and `/tp`. Add any aliases your server provides.
+- **Inventory recovery:** disk snapshots retain equipment, cursor items and owned vanilla menu inputs for recovery after a restart or chunk unload.
+- **Optional ender chest restriction:** disable ender chests server-wide for your arena or SMP rules.
+- **Offline-mode authentication:** built-in registration, BCrypt password hashing, login timeouts and lockouts. Online-mode players never need `/register` or `/login`.
+
+The mannequin itself is not saved in chunks. Restarting the server does not recreate the offline fight. Recovery has [documented crash and compatibility limits](#security).
+
+## Common questions
+
+**Do players need Fabric or this mod on their client?** No. Install Combat Persistence and Fabric API on the dedicated Fabric server only.
+
+**Is this a Paper, Spigot, Forge or NeoForge plugin?** No. This release targets Fabric servers. Do not place it in a Bukkit-style `plugins` folder.
+
+**Does it work on older Minecraft versions?** Use the [Modrinth version selector](https://modrinth.com/mod/combat-persistence/versions). Install only a release explicitly marked for your server's Minecraft version.
+
+**Does it work with every modpack or authentication proxy?** Compatibility with custom inventories, commands, packets and proxies needs testing on your server. See the [security review](SECURITY_REVIEW.md) for the tested scope.
 
 ## Configuration
 
@@ -107,17 +134,11 @@ A crash after committing an NPC death or consuming an overflow recovery snapshot
 
 ## Support
 
-If you find this mod useful, you can support development here:
-[ko-fi.com/pottersgame](https://ko-fi.com/pottersgame)
+[Download or update on Modrinth](https://modrinth.com/mod/combat-persistence/versions). Follow the project there to keep track of releases.
 
-## Installation
+For a bug report, include your Minecraft version, Fabric Loader version, mod version, other mods and steps to reproduce. Remove passwords, addresses and player data from logs before sharing them in [GitHub Issues](https://github.com/adamhrnciar/combat-persistance/issues).
 
-1.  Use a Minecraft **26.3** dedicated server with **Java 25 or later** and **Fabric Loader 0.20.1 or later**.
-2.  Download the matching release from [Modrinth](https://modrinth.com/mod/combat-persistence/versions).
-3.  Place the `.jar` and **Fabric API for Minecraft 26.3** in your server's `mods` folder.
-4.  Start the server, review `config/combatpersistence.json`, and test recovery on a disposable world before migration.
-
-Use Modrinth's version selector for older Minecraft releases. Each release supports only its listed game versions.
+Optional donations: [ko-fi.com/pottersgame](https://ko-fi.com/pottersgame).
 
 ## License
 
