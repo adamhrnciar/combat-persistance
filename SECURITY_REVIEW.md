@@ -46,7 +46,7 @@ Live testing caught issues that a successful compile and mixin transformation al
 - Local network probes use the actual Minecraft 26.3 vanilla protocol without a client mod. They are protocol probes, not graphical Minecraft clients. The test world uses localhost offline mode to exercise password authentication.
 - Completed live checks include initial inventory/position hiding, blocked movement and commands, a malicious teleport acknowledgement, duplicate name/case joins retaining the owner, the configuration-phase race allowing one player into play, crafting/cursor/equipment and anvil recovery, overflow, repeated NPC death releasing loot once, pending death, respawn/dead-player login, process-kill recovery, failed player writes, password races and lockout/reset.
 - Final timeout and failed-reset fault injection passed on the release artifact. The original account and authenticated session remained intact after the refused reset; a later successful reset and registration worked. Another combat inventory round trip passed.
-- Final artifact hashes, live results and publication checks are recorded in [the release validation record](docs/release/validation.md). Reusable instrumentation is documented in [tools/validation](tools/validation/README.md).
+- The test tooling is documented in [tools/validation](tools/validation/README.md).
 - No third-party gameplay mod or proxy compatibility is certified. Graphical client rendering and optional external skin lookups are outside the live matrix.
 
 ## Remaining limits and deployment requirements

@@ -1,8 +1,13 @@
 {
   "title": "Combat Persistence",
-  "description": "Keep PvP fights fair: combat logging leaves a killable NPC with the player’s loot. Server-side Fabric protection for survival and PvP. No client mod needed.",
-  "categories": ["management", "utility"],
-  "additional_categories": ["game-mechanics"],
+  "description": "Stops combat logging on Fabric servers. Quit mid-fight and a copy of you stays behind with your gear. Kill it and take the loot. Server-side only, players don't need to install anything.",
+  "categories": [
+    "management",
+    "utility"
+  ],
+  "additional_categories": [
+    "game-mechanics"
+  ],
   "issues_url": "https://github.com/adamhrnciar/combat-persistance/issues",
   "source_url": "https://github.com/adamhrnciar/combat-persistance",
   "donation_urls": [

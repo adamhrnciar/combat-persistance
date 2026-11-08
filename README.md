@@ -1,52 +1,54 @@
 # Combat Persistence
 
-**Keep PvP fights fair when players disconnect. A server-side Fabric anti-combat-logging mod for survival and PvP servers.**
+A server-side Fabric mod that stops combat logging. If a player quits in the middle of a fight, a copy of them stays behind with their gear until the combat timer runs out. Kill it and their items drop. When they log back in, they're dead.
 
-A player leaves mid-fight. Their opponent still has a chance to finish it: Combat Persistence leaves a vulnerable NPC mannequin behind for the rest of the combat timer. If the mannequin dies, the player's items drop and the player dies when they return.
+Players don't need to install anything. It only goes on the server.
 
-**Install on your server only. Players need no client mod.**
+[Download on Modrinth](https://modrinth.com/mod/combat-persistence/versions) · [Config](#configuration) · [Report a bug](https://github.com/adamhrnciar/combat-persistance/issues)
 
-[**Download on Modrinth**](https://modrinth.com/mod/combat-persistence/versions) · [Configuration](#configuration) · [Report a bug](https://github.com/adamhrnciar/combat-persistance/issues)
+Current release: 1.10.0 for Minecraft 26.3 (Fabric Loader 0.20.1+, Java 25+, needs Fabric API).
 
-Current release: **1.10.0** for **Minecraft 26.3**, **Fabric Loader 0.20.1+** and **Java 25+**. Requires **Fabric API**.
+![A player logs out mid-fight, their mannequin gets killed and drops the loot](docs/media/combat-log.gif)
 
-## How combat logging protection works
+## How it works
 
-1. **Players fight.** PvP damage tags both players. The action bar shows the remaining time; the default tag lasts 15 seconds.
-2. **A tagged player disconnects.** A mannequin stays at their location, wearing their equipment and available skin.
-3. **The fight can continue.** Killing the mannequin drops the tracked items and records a death for the player's return.
-4. **The player returns.** If the mannequin survived, the saved inventory is restored. The mannequin disappears when the tag expires.
+1. Hitting another player puts you both in combat for 15 seconds (configurable). The countdown shows above the hotbar.
+2. If you log out during combat, an `[OFFLINE]` mannequin with your gear stays where you were.
+3. If someone kills it, your items drop and you die the next time you join.
+4. If nobody kills it before the timer runs out, it disappears and you get everything back when you log in.
 
-Only PvP damage starts a combat tag. Mob attacks and environmental damage do not. A connection loss during combat follows the same rules as deliberately logging out.
+Only PvP starts the timer. Mobs and environmental damage don't. Losing connection counts the same as quitting.
 
-## Installation
+| Nobody kills the mannequin | Escape commands are blocked |
+| --- | --- |
+| ![The mannequin survives and the player logs back in with all their gear](docs/media/survive.gif) | ![Trying /spawn and /tp during combat](docs/media/blocked-commands.gif) |
 
-1.  Use a Minecraft **26.3** dedicated server with **Java 25 or later** and **Fabric Loader 0.20.1 or later**.
-2.  Download the matching release from [Modrinth](https://modrinth.com/mod/combat-persistence/versions).
-3.  Place the `.jar` and [Fabric API for Minecraft 26.3](https://modrinth.com/mod/fabric-api/versions?g=26.3) in your server's `mods` folder.
-4.  Start the server, review `config/combatpersistence.json`, and test recovery on a disposable world before migration.
+## Installing
 
-Use Modrinth's version selector for older Minecraft releases. Each release supports only its listed game versions.
+1. Run a Minecraft 26.3 Fabric server with Fabric Loader 0.20.1 or newer and Java 25.
+2. Put the mod and [Fabric API for 26.3](https://modrinth.com/mod/fabric-api/versions?g=26.3) in the `mods` folder.
+3. Start the server once and edit `config/combatpersistence.json` if you want to change anything.
 
-## Server rules you control
+For older Minecraft versions, use the version list on [Modrinth](https://modrinth.com/mod/combat-persistence/versions). Each file only supports the versions listed for it.
 
-- **Combat timer and messages:** choose the tag duration, action bar text, NPC name prefix and death announcement.
-- **Combat command blocking:** block escapes such as `/home`, `/spawn` and `/tp`. Add any aliases your server provides.
-- **Inventory recovery:** disk snapshots retain equipment, cursor items and owned vanilla menu inputs for recovery after a restart or chunk unload.
-- **Optional ender chest restriction:** disable ender chests server-wide for your arena or SMP rules.
-- **Offline-mode authentication:** built-in registration, BCrypt password hashing, login timeouts and lockouts. Online-mode players never need `/register` or `/login`.
+## What else it does
 
-The mannequin itself is not saved in chunks. Restarting the server does not recreate the offline fight. Recovery has [documented crash and compatibility limits](#security).
+- Blocks `/spawn`, `/home`, `/tp`, `/tpa`, `/warp` and `/back` during combat. Add your own commands or aliases to the list.
+- Saves the inventory to disk when someone combat logs, so a restart or chunk unload doesn't eat their items.
+- Can turn off ender chests server-wide if you run an arena.
+- Has an optional `/register` and `/login` system for offline-mode servers. Online-mode players never see it.
 
-## Common questions
+The mannequin itself isn't saved with the world, so a restart ends the fight. The inventory is still restored on the next join.
 
-**Do players need Fabric or this mod on their client?** No. Install Combat Persistence and Fabric API on the dedicated Fabric server only.
+## Questions
 
-**Is this a Paper, Spigot, Forge or NeoForge plugin?** No. This release targets Fabric servers. Do not place it in a Bukkit-style `plugins` folder.
+**Do players need the mod?** No, only the server.
 
-**Does it work on older Minecraft versions?** Use the [Modrinth version selector](https://modrinth.com/mod/combat-persistence/versions). Install only a release explicitly marked for your server's Minecraft version.
+**Is this a Paper, Spigot, Forge or NeoForge plugin?** No. It's a Fabric mod and goes in the `mods` folder.
 
-**Does it work with every modpack or authentication proxy?** Compatibility with custom inventories, commands, packets and proxies needs testing on your server. See the [security review](SECURITY_REVIEW.md) for the tested scope.
+**Older Minecraft versions?** Check the [Modrinth version list](https://modrinth.com/mod/combat-persistence/versions) and only use a file marked for your version.
+
+**Does it work with other mods?** Vanilla inventories are covered. Mods with their own inventory slots, custom commands or auth proxies haven't been tested, so try it on a test world first.
 
 ## Configuration
 
@@ -60,7 +62,7 @@ The configuration file is located at `config/combatpersistence.json`.
 | `playSpawnSound` | `true` | Plays a thunder sound when an NPC spawns. |
 | `combatMessage` | `§c§lIN COMBAT: §f%s s remaining` | The action bar message shown to tagged players. Use `%s` for time remaining. |
 | `npcDeathBroadcast` | `§c[PvP] §7%s combat logged and was slain!` | The message broadcast when an NPC is killed. |
-| `debugLogging` | `false` | Verbose INFO-level diagnostics for combat-log snapshots, restores and NPC lifecycle — for debugging on production servers. Errors are always logged regardless. |
+| `debugLogging` | `false` | Extra INFO logging for snapshots, restores and mannequins. Useful when debugging a live server. Errors are always logged. |
 | `inventoryRestoredMessage` | `§aYour inventory has been restored.` | Message sent when a player's inventory is restored. |
 | `blockedCommands` | `[...]` | List of commands disabled during combat (e.g., /spawn, /home). Namespaced forms like `/minecraft:tp` are blocked automatically; command *aliases* (e.g. `/teleport` for `/tp`) need their own entry. |
 | `commandBlockedInCombatMessage` | `§cYou cannot use this command while in combat!` | Message shown when a blocked command is used in combat. |
@@ -74,7 +76,7 @@ The configuration file is located at `config/combatpersistence.json`.
 ### Authentication Settings
 | Setting | Default | Description |
 | :--- | :--- | :--- |
-| `enableAuth` | `true` | Enables the built-in authentication system. Auth only ever applies to **offline-mode** servers — online-mode servers already have Mojang-verified identities, so players there are never asked to register or log in. |
+| `enableAuth` | `true` | Turns on the built-in login system. It only applies to offline-mode servers. On online-mode servers Mojang already verifies accounts, so nobody is asked to register. |
 | `forceAuthInOfflineMode` | `true` | Requires authentication when the server is in offline mode. Set to `false` to opt an offline-mode server out of password auth entirely. |
 | `enableIpAutoLogin` | `false` | Optional IP-based autologin. Off by default (weak behind shared NAT/proxies). |
 | `sessionDurationHours` | 24 | How long an autologin session lasts for standard players. |
@@ -113,33 +115,24 @@ The configuration file is located at `config/combatpersistence.json`.
 
 ## Security
 
-This mod addresses several common vulnerabilities:
-*   **Crafting and Cursor Protection**: Snapshots include owned crafting and vanilla menu inputs, cursor items and equipment. Recipe result previews never become extra loot.
-*   **Ghost Inventory**: Ensures inventory state is cleared before the player fully disconnects.
-*   **Connection Protection**: Rejects duplicate player names/UUIDs before vanilla can kick the existing connection. Password verification results apply only to the original, still-connected player.
-*   **Signed-Command Bypass**: Auth and combat command blocking cover both the plain and the signed chat-command packet paths.
-*   **Durable Handoffs**: Serialized, atomic snapshot writes propagate failures. Inventory recovery commits player data before consuming its backup. NPC death commits its death record before exposing loot.
+A few things are worth knowing before you put this on a public server.
 
-### Deployment limits
+**Offline mode.** Offline mode doesn't encrypt traffic, so `/register` and `/login` passwords can be read by anyone who can see the connection. Hashing only protects the stored passwords. Use online mode for public servers if you can, or put the server behind an encrypted tunnel. Players shouldn't reuse real passwords.
 
-Prefer Minecraft online mode for public servers. Offline-mode password commands travel without Minecraft transport encryption; BCrypt protects stored hashes, not network traffic. Use a trusted encrypted tunnel or a correctly secured authentication proxy if offline mode is necessary. Never reuse an important password.
+**Recommended settings.** Keep `enableIpAutoLogin=false`, `hideInventoryBeforeAuth=true` and `hideCoordinatesBeforeAuth=true`. In offline mode, the first person to register a name owns it, so whitelist your existing players and have them register before you open the server. Lockouts can lock out the real owner for a while, and a restart resets the attempt counters.
 
-Keep `enableIpAutoLogin=false`, `hideInventoryBeforeAuth=true` and `hideCoordinatesBeforeAuth=true` for the strongest built-in protection. An unregistered offline name belongs to whoever registers it first; use a whitelist and prearranged registration for existing players. Account lockouts can temporarily deny the real owner access, and restart clears the in-memory attempt counters.
+**Skins.** Custom skin lookups are off by default. Turning on `enableSkinLookups` sends the requested name or UUID and your server's IP to Mojang.
 
-Custom skin requests are disabled by default. Enabling `enableSkinLookups` sends requested names/UUIDs and the server's IP to Mojang. Clients may also fetch the returned texture from Mojang. This setting does not control Minecraft's own network requests or other mods' behavior.
+**Backups.** Back up the world together with `config/auth_data.json`, `pending_locations.json`, `pending_inventories.json` and `combat_persistence_data.json`. They contain password hashes, inventories and coordinates, so keep the backups private. If one of these files can't be read, the server refuses to start instead of quietly treating everyone as unregistered.
 
-Back up the world/player data together with `config/auth_data.json`, `pending_locations.json`, `pending_inventories.json` and `combat_persistence_data.json`. These files contain password hashes, inventory contents and coordinates; new atomic writes restrict them to the owner on POSIX filesystems. Restrict backup access too. Unreadable recovery or account files stop startup rather than silently treating players as unregistered.
-
-A crash after committing an NPC death or consuming an overflow recovery snapshot can still lose loot before the world saves it. Recovery favors preventing duplicate releases; it does not provide a transaction spanning player files, recovery files and world chunks. Other mods' custom inventories, commands and network packets require separate compatibility testing. Review [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for tested scope and remaining checks.
+**Known limits.** If the server crashes right after a mannequin dies or an overflow snapshot is used, the items can be lost before the world saves. The mod is built to avoid giving items out twice, but there's no single transaction across player files, recovery files and chunks. It also guards against duplicate logins, crafting-grid and cursor dupes, and the signed-command bypass. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for what was tested.
 
 ## Support
 
-[Download or update on Modrinth](https://modrinth.com/mod/combat-persistence/versions). Follow the project there to keep track of releases.
+Bug reports go in [GitHub Issues](https://github.com/adamhrnciar/combat-persistance/issues). Include your Minecraft, Fabric Loader and mod versions, your other mods, and how to reproduce it. Remove passwords, IP addresses and player data from logs first.
 
-For a bug report, include your Minecraft version, Fabric Loader version, mod version, other mods and steps to reproduce. Remove passwords, addresses and player data from logs before sharing them in [GitHub Issues](https://github.com/adamhrnciar/combat-persistance/issues).
-
-Optional donations: [ko-fi.com/pottersgame](https://ko-fi.com/pottersgame).
+If the mod is useful to you, a follow on [Modrinth](https://modrinth.com/mod/combat-persistence) or a coffee on [Ko-fi](https://ko-fi.com/pottersgame) is appreciated.
 
 ## License
 
-This project is licensed under the GPL-3.0 License.
+GPL-3.0.
