@@ -233,7 +233,7 @@ public final class SlottedInventory {
 
         /** Release overflow only after the source snapshot is durably consumed. */
         public void dropOverflow(ServerPlayer player) {
-            for (ItemStack stack : overflow) player.drop(stack, false, net.minecraft.util.Prediction.SERVER_ONLY);
+            for (ItemStack stack : overflow) player.drop(stack, false);
             overflow.clear();
         }
     }

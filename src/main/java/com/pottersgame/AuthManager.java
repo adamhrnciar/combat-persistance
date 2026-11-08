@@ -328,7 +328,7 @@ public class AuthManager {
         if (Combatpersistence.tracker.isPendingDeath(player.getUUID())) {
             CombatEvents.handlePendingDeath(player);
             player.setNoGravity(false);
-            player.setPermanentlyInvulnerable(false);
+            player.setInvulnerable(false);
             return true;
         }
 
@@ -346,7 +346,7 @@ public class AuthManager {
         player.setDeltaMovement(Vec3.ZERO);
         player.resetFallDistance();
         player.setNoGravity(false);
-        player.setPermanentlyInvulnerable(false);
+        player.setInvulnerable(false);
         return true;
         } catch (RuntimeException exception) {
             authenticatedPlayers.remove(player.getUUID(), player.connection);

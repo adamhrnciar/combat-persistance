@@ -77,7 +77,7 @@ class SlottedInventoryTest {
         assertTrue(anvil.getCarried().isEmpty());
         // Closing after the handoff cannot release a second copy of the inputs.
         anvil.removed(player);
-        verify(player, never()).drop(any(ItemStack.class), anyBoolean(), any());
+        verify(player, never()).drop(any(ItemStack.class), anyBoolean());
         assertEquals(3, snapshot.stream().filter(item -> item.stack().is(Items.EMERALD))
             .findFirst().orElseThrow().stack().getCount());
     }

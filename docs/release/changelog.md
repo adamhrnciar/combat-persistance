@@ -1,7 +1,7 @@
 ### Compatibility
 
-- Update to Minecraft 26.3, Fabric Loader 0.20.1 and Fabric API 0.165.2+26.3.
-- Require Java 25 or later. This build supports Minecraft 26.3; use older releases for other Minecraft versions.
+- Minecraft 26.2 build of 1.10.0, with the same fixes as the 26.3 release. Built against Fabric Loader 0.20.1 and Fabric API 0.161.0+26.2.
+- Require Java 25 or later. This build supports Minecraft 26.2 only; use the 26.3 file for Minecraft 26.3.
 
 ### Inventory and recovery
 
@@ -20,7 +20,7 @@
 - Bind authentication to the current connection and reject stale asynchronous password results after disconnect, account reset or replacement.
 - Reject duplicate UUIDs and case-insensitive names before vanilla replaces the existing connection; recheck before entering play.
 - Hide inventory, position and last-death coordinates before initial play packets when the corresponding settings are enabled.
-- Guard additional unauthenticated packet paths, including Minecraft 26.3 movement and punch paths, and recheck queued commands.
+- Guard additional unauthenticated packet paths, including movement and punch paths, and recheck queued commands.
 - Allow authenticated recovery and respawn after reconnecting while dead; clear combat tags on legitimate player death.
 - Clear early-login crafting state without sending packets before the listener exists.
 - Bound password workers, failed-attempt records and skin request queues.

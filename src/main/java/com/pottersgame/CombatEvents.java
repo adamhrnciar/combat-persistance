@@ -170,7 +170,7 @@ public class CombatEvents {
                 // auth off can never strand a player's items in the pending-inventory
                 // file or leave them floating and invulnerable from a pre-auth join.
                 player.setNoGravity(false);
-                player.setPermanentlyInvulnerable(false);
+                player.setInvulnerable(false);
                 Combatpersistence.authManager.restoreLocation(player);
                 if (tracker.isPendingDeath(uuid)) {
                     handlePendingDeath(player);
@@ -257,7 +257,7 @@ public class CombatEvents {
         CombatConfig config = Combatpersistence.config;
         if (!Combatpersistence.authManager.authRequired(server)) return;
         player.setNoGravity(true);
-        player.setPermanentlyInvulnerable(true);
+        player.setInvulnerable(true);
         if (Combatpersistence.tracker.isPendingDeath(player.getUUID())
                 || Combatpersistence.tracker.getNPCForPlayer(player.getUUID()) != null) {
             SlottedInventory.clearLiveInventory(player);
