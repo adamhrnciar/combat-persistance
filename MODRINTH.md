@@ -6,6 +6,8 @@ Not with this mod. If a player leaves while they're in combat, a copy of them st
 
 It runs on the server only. Your players don't need to install anything.
 
+For Fabric survival and PvP servers. [See available Minecraft versions](https://modrinth.com/mod/combat-persistence/versions).
+
 ![A player logs out mid-fight, their mannequin gets killed and drops the loot](https://raw.githubusercontent.com/adamhrnciar/combat-persistance/main/docs/media/combat-log.gif)
 
 ## How it works
@@ -70,3 +72,13 @@ One warning: offline mode doesn't encrypt traffic, so passwords can be read by a
 Found a bug? [Open an issue](https://github.com/adamhrnciar/combat-persistance/issues) with your Minecraft version, mod version and server log, and I'll take a look. Remove passwords and IP addresses from the log first.
 
 If this saves your server some drama, following the project here helps, and so does a coffee on [Ko-fi](https://ko-fi.com/pottersgame).
+
+Need a different Minecraft version or loader? [Tell me what your server uses](https://github.com/adamhrnciar/combat-persistance/issues/new?template=compatibility_request.yml). Requests help decide which ports are worth maintaining; they don't promise a release.
+
+## Custom work for your server
+
+Want a different combat rule, command restriction, or integration with another mod? [Ask about paid customization](https://github.com/adamhrnciar/combat-persistance/issues/new?template=custom_work.yml).
+
+Describe what you need and which Minecraft version and mods your server uses. I'll check feasibility before agreeing on scope, price, or a delivery date. An inquiry does not commit either of us to paid work.
+
+Combat Persistence stays free. Bug reports and ordinary feature requests don't require payment.

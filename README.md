@@ -4,7 +4,7 @@ A server-side Fabric mod that stops combat logging. If a player quits in the mid
 
 Players don't need to install anything. It only goes on the server.
 
-[Download on Modrinth](https://modrinth.com/mod/combat-persistence/versions) · [Config](#configuration) · [Report a bug](https://github.com/adamhrnciar/combat-persistance/issues)
+[Download on Modrinth](https://modrinth.com/mod/combat-persistence/versions) · [Config](#configuration) · [Report a bug](https://github.com/adamhrnciar/combat-persistance/issues) · [Custom work](#custom-work)
 
 Current release: 1.10.0 for Minecraft 26.3 (Fabric Loader 0.20.1+, Java 25+, needs Fabric API).
 
@@ -132,6 +132,16 @@ A few things are worth knowing before you put this on a public server.
 Bug reports go in [GitHub Issues](https://github.com/adamhrnciar/combat-persistance/issues). Include your Minecraft, Fabric Loader and mod versions, your other mods, and how to reproduce it. Remove passwords, IP addresses and player data from logs first.
 
 If the mod is useful to you, a follow on [Modrinth](https://modrinth.com/mod/combat-persistence) or a coffee on [Ko-fi](https://ko-fi.com/pottersgame) is appreciated.
+
+Need a different Minecraft version or loader? [Tell me what your server uses](https://github.com/adamhrnciar/combat-persistance/issues/new?template=compatibility_request.yml). This helps decide which ports are worth maintaining; it doesn't promise a release.
+
+## Custom work
+
+Need Combat Persistence adjusted for your server? [Ask about paid customization](https://github.com/adamhrnciar/combat-persistance/issues/new?template=custom_work.yml), such as a combat rule, command restriction, or integration with another mod.
+
+Describe the change, your server version, and the mods involved. I'll review whether it is feasible before agreeing on scope, price, or a delivery date. An inquiry does not commit either of us to paid work.
+
+The mod stays free. Bug reports and ordinary feature requests are welcome without payment.
 
 ## License
 

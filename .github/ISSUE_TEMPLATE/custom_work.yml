@@ -1,0 +1,51 @@
+name: Paid customization inquiry
+description: Ask about a Combat Persistence change for your server.
+title: "[Custom work] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the work you have in mind. Feasibility, scope, price, and timing must be agreed before any paid work starts. This inquiry is not an order or a promise of delivery.
+
+        This is a public issue. Do not include passwords, server access details, private IP addresses, or payment information. You can leave the budget blank.
+
+        Bug reports and ordinary feature requests do not require payment; use a regular issue for those.
+  - type: textarea
+    id: change
+    attributes:
+      label: What would you like changed?
+      description: Describe the current behavior and the result you want. A concrete example helps.
+      placeholder: "While a player is tagged, I want..."
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Server versions
+      description: Minecraft, Fabric Loader, Fabric API, and Combat Persistence versions.
+    validations:
+      required: true
+  - type: textarea
+    id: integrations
+    attributes:
+      label: Other mods involved
+      description: Include public project links and versions, or write "None".
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How would we know the change works?
+      description: Give a short in-game scenario and its expected outcome.
+    validations:
+      required: true
+  - type: input
+    id: budget
+    attributes:
+      label: Budget range (optional)
+      description: Only include a range if you are comfortable sharing it publicly. Specify the currency.
+  - type: input
+    id: timing
+    attributes:
+      label: Timing (optional)
+      description: Mention any deadline. Availability and delivery dates are not guaranteed.

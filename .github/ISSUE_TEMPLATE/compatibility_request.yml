@@ -1,0 +1,36 @@
+name: Minecraft version or loader request
+description: Tell me which version or loader prevents your server from using the mod.
+title: "[Compatibility] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the Modrinth version list and existing issues first. If someone already requested your version, add a reaction or relevant details there.
+
+        Requests help choose which ports to investigate. They do not promise a release, and no payment is required. Do not share private server addresses or credentials.
+  - type: input
+    id: minecraft
+    attributes:
+      label: Minecraft version
+      placeholder: "Exact Minecraft version"
+    validations:
+      required: true
+  - type: input
+    id: loader
+    attributes:
+      label: Loader or server software
+      placeholder: "Fabric, NeoForge, Paper, or another server platform"
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: How would you use Combat Persistence?
+      description: Describe your server or modpack and why you need this version. Public modpack links are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: blockers
+    attributes:
+      label: Mods or features you depend on (optional)
+      description: Mention anything a port would need to work with.
