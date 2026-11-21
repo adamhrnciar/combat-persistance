@@ -13,6 +13,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.Scoreboard;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -59,6 +60,12 @@ class KeptRestoreTest {
         } finally {
             configDirectory.set(loader, previousDirectory);
         }
+    }
+
+    /** Async saves run on DiskIO's single writer thread. Drain it before JUnit
+     *  deletes the temp directory, or a late write races the cleanup. */
+    @AfterEach void drainAsyncWrites() {
+        DiskIO.sync(() -> {});
     }
 
     @BeforeEach void setUp() {
