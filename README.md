@@ -36,6 +36,8 @@ For older Minecraft versions, use the version list on [Modrinth](https://modrint
 - Blocks `/spawn`, `/home`, `/tp`, `/tpa`, `/warp` and `/back` during combat. Add your own commands or aliases to the list.
 - Saves the inventory to disk when someone combat logs, so a restart or chunk unload doesn't eat their items.
 - Can turn off ender chests server-wide if you run an arena.
+- Puts the mannequin on its owner's scoreboard team. With friendly fire off, teammates can't kill or loot it.
+- Lets other server mods react to mannequin kills and keep chosen items. See [API for other mods](#api-for-other-mods).
 - Has an optional `/register` and `/login` system for offline-mode servers. Online-mode players never see it.
 
 The mannequin itself isn't saved with the world, so a restart ends the fight. The inventory is still restored on the next join.
@@ -112,6 +114,38 @@ The configuration file is located at `config/combatpersistence.json`.
 *   **/login <password>**: Login to your account.
 *   **/skin <name>**: Change your skin using a Mojang account name.
 *   **/authreset <player>**: *(Operator only)* Reset a player's account so they must register again.
+
+## API for other mods
+
+Since 1.11.0, other server-side Fabric mods can hook into combat-log NPCs through the `com.pottersgame.api` package. Compile against the Combat Persistence jar as `compileOnly` (never bundle it), and only touch these classes when `FabricLoader.getInstance().isModLoaded("combatpersistence")` is true, so your mod still runs without it.
+
+| API | What it does |
+| :--- | :--- |
+| `CombatNpcEvents.NPC_KILLED` | Fired once when a combat-log NPC dies and its death is saved: `(ServerLevel level, UUID ownerUuid, String ownerName, LivingEntity npc, DamageSource source)`. `source.getEntity()` is the killer, if any. |
+| `CombatNpcEvents.KEEP_ON_NPC_DEATH` | Asked for each stored item before anything drops: `boolean shouldKeep(UUID ownerUuid, ItemStack stack, int slot, boolean isEquipmentSlot)`. If any listener returns `true`, the item does not drop. It is saved together with the owner's death and given back after their next join, once they have died and respawned. |
+| `CombatPersistenceApi.isInCombat(ServerPlayer)` | Whether the player is combat-tagged right now. |
+
+Slots are vanilla inventory indices: `0-35` main inventory, `36-39` armor (feet to head), `40` offhand, `-1` (`CombatNpcEvents.NO_SLOT`) for the cursor and crafting grid. The stack passed to `shouldKeep` is a copy. Listeners run on the server thread; one that throws is logged and ignored. With no listeners, every item drops as before.
+
+```java
+// Only call this when FabricLoader.getInstance().isModLoaded("combatpersistence") is true.
+public final class CombatPersistenceCompat {
+    public static void register() {
+        // Armor stays with the player, like a keep-armor death rule.
+        CombatNpcEvents.KEEP_ON_NPC_DEATH.register((owner, stack, slot, isEquipmentSlot) ->
+            isEquipmentSlot && slot != Inventory.SLOT_OFFHAND);
+
+        // Pay a bounty for killing a combat logger.
+        CombatNpcEvents.NPC_KILLED.register((level, ownerUuid, ownerName, npc, source) -> {
+            if (source.getEntity() instanceof ServerPlayer killer) {
+                killer.sendSystemMessage(Component.literal("You killed " + ownerName + "'s combat logger"));
+            }
+        });
+    }
+}
+```
+
+The NPC joins its owner's scoreboard team. If that team has friendly fire off, teammates cannot damage it.
 
 ## Security
 

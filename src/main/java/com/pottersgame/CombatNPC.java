@@ -14,6 +14,8 @@ import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -136,6 +138,13 @@ public class CombatNPC extends Mannequin {
         }
         Combatpersistence.LOGGER.info("Spawned CombatNPC for {} (UUID: {})", playerName, npc.getUUID());
 
+        // Join the owner's scoreboard team so team rules (friendly fire,
+        // colours, allies) apply to the NPC as they did to its owner.
+        PlayerTeam ownerTeam = original.getTeam();
+        if (ownerTeam != null) {
+            world.getScoreboard().addPlayerToTeam(npc.getScoreboardName(), ownerTeam);
+        }
+
         if (config.playSpawnSound) {
             world.playSound(null, npc.getX(), npc.getY(), npc.getZ(), 
                 net.minecraft.sounds.SoundEvents.LIGHTNING_BOLT_THUNDER, 
@@ -143,6 +152,21 @@ public class CombatNPC extends Mannequin {
         }
 
         return npc;
+    }
+
+    /** Removes an NPC's scoreboard team entry, whether or not the entity is still loaded. */
+    public static void leaveTeam(Scoreboard scoreboard, UUID npcUuid) {
+        String entry = npcUuid.toString();
+        PlayerTeam team = scoreboard.getPlayersTeam(entry);
+        if (team != null) scoreboard.removePlayerFromTeam(entry, team);
+    }
+
+    @Override
+    public void remove(RemovalReason reason) {
+        super.remove(reason);
+        // Covers discard (rejoin, tag expiry), death and unload. The NPC is never
+        // saved, so its team entry must not outlive the entity.
+        if (this.level() instanceof ServerLevel world) leaveTeam(world.getScoreboard(), this.getUUID());
     }
 
     @Override

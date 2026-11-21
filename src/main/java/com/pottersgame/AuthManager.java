@@ -342,6 +342,11 @@ public class AuthManager {
         // Then add back items that were moved to a combat-log NPC, if any.
         CombatEvents.cleanUpNpc(player, Combatpersistence.tracker, player.level().getServer());
 
+        // Items kept from a killed NPC, if the player is already alive again
+        // (a dead player gets them on respawn instead). After the NPC restore,
+        // which replaces the live inventory.
+        Combatpersistence.tracker.restoreKeptItems(player);
+
         // Land them cleanly: only now is it safe to re-enable physics.
         player.setDeltaMovement(Vec3.ZERO);
         player.resetFallDistance();
