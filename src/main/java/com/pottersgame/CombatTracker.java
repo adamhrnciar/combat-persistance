@@ -9,6 +9,8 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
 import com.pottersgame.api.CombatNpcEvents;
 
 import java.io.*;
@@ -32,6 +34,8 @@ public class CombatTracker {
      *  so a crash between the player save and the tracker save cannot place the
      *  same batch twice. */
     static final String KEPT_MARKER_PREFIX = "combatpersistence.kept.";
+    /** NPC UUIDs this mod put on a scoreboard team; swept at startup. */
+    private final Set<UUID> npcTeamEntries = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     public CombatTracker() {
         this(FabricLoader.getInstance().getConfigDir());
@@ -314,18 +318,81 @@ public class CombatTracker {
         }
     }
 
+    /** Saves a player's data file; a seam so tests can inject write failures. */
+    @FunctionalInterface
+    interface PlayerSave {
+        void save(ServerPlayer player);
+    }
+
+    enum KeptOutcome { RESTORED, ALREADY_PLACED, NO_ROOM, REFUSED }
+
+    /** Result of one batch restore; {@code missingSlots} is set for {@link KeptOutcome#NO_ROOM}. */
+    record KeptRestore(KeptOutcome outcome, int missingSlots) {
+        static final KeptRestore REFUSED = new KeptRestore(KeptOutcome.REFUSED, 0);
+    }
+
+    /** Target slot per item (all empty and distinct), or how many more free slots are needed. */
+    record KeptPlacement(int[] slots, int missingSlots) {}
+
+    /**
+     * Plans a batch into empty slots only, so a placement can always be undone
+     * exactly. Items go back to their original slot when it is empty, the rest
+     * into free main-inventory slots. A batch is placed whole or not at all.
+     */
+    static KeptPlacement planKeptPlacement(net.minecraft.world.entity.player.Inventory inventory,
+            List<SlottedInventory.SlottedStack> items) {
+        int size = inventory.getContainerSize();
+        boolean[] taken = new boolean[size];
+        int[] slots = new int[items.size()];
+        Arrays.fill(slots, -1);
+        for (int i = 0; i < items.size(); i++) {
+            int slot = items.get(i).slot();
+            if (slot >= 0 && slot < size && !taken[slot] && inventory.getItem(slot).isEmpty()) {
+                slots[i] = slot;
+                taken[slot] = true;
+            }
+        }
+        int missing = 0;
+        int next = 0;
+        for (int i = 0; i < items.size(); i++) {
+            if (slots[i] >= 0) continue;
+            while (next < SlottedInventory.MAIN_SIZE && (taken[next] || !inventory.getItem(next).isEmpty())) next++;
+            if (next < SlottedInventory.MAIN_SIZE) {
+                slots[i] = next;
+                taken[next] = true;
+            } else {
+                missing++;
+            }
+        }
+        return new KeptPlacement(slots, missing);
+    }
+
     /**
      * Hands kept items back once the owner is alive again after their
-     * join-death. No-op while dead or still owing a death. Each batch is placed
-     * at most once: the player save that carries its items also carries a
-     * marker tag, and only then is the batch consumed.
+     * join-death. No-op while dead or still owing a death. Called on join,
+     * authentication and respawn, so a batch that does not fit yet is simply
+     * retried on the next of those.
      */
     public void restoreKeptItems(ServerPlayer player) {
         UUID uuid = player.getUUID();
         if (!player.isAlive() || isPendingDeath(uuid)) return;
         try {
-            for (KeptBatch batch : getKeptBatches(uuid)) {
-                if (!restoreKeptBatch(player, batch)) return;
+            List<KeptBatch> batches = getKeptBatches(uuid);
+            removeStaleKeptMarkers(player, batches);
+            boolean restored = false;
+            for (KeptBatch batch : batches) {
+                KeptRestore result = restoreKeptBatch(player, batch, () -> decodeKept(player, batch), PlayerDataPersistence::save);
+                if (result.outcome() == KeptOutcome.RESTORED) {
+                    restored = true;
+                } else if (result.outcome() == KeptOutcome.NO_ROOM) {
+                    player.sendSystemMessage(net.minecraft.network.chat.Component.literal(String.format(
+                        Combatpersistence.config.keptItemsNeedSpaceMessage, result.missingSlots())));
+                    break;
+                }
+            }
+            if (restored) {
+                player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                    Combatpersistence.config.keptItemsRestoredMessage));
             }
         } catch (RuntimeException error) {
             // Never block a join or respawn; the durable batch stays for a retry.
@@ -333,31 +400,73 @@ public class CombatTracker {
         }
     }
 
-    private boolean restoreKeptBatch(ServerPlayer player, KeptBatch batch) {
+    private static List<SlottedInventory.SlottedStack> decodeKept(ServerPlayer player, KeptBatch batch) {
+        SlottedInventory.DecodeResult decoded = SlottedInventory.decodeAll(player.level(), batch.items);
+        return decoded.failures() == 0 ? decoded.items() : null;
+    }
+
+    /** Drops markers whose batch is no longer pending (consumed after a failed tag removal). */
+    static void removeStaleKeptMarkers(ServerPlayer player, List<KeptBatch> pending) {
+        Set<String> live = new HashSet<>();
+        for (KeptBatch batch : pending) live.add(KEPT_MARKER_PREFIX + batch.batchId);
+        for (String tag : List.copyOf(player.entityTags())) {
+            if (tag.startsWith(KEPT_MARKER_PREFIX) && !live.contains(tag)) player.removeTag(tag);
+        }
+    }
+
+    /**
+     * Places one kept batch at most once. The marker tag goes on the player
+     * before any item does, and player data with items and marker is saved
+     * before the batch is consumed. A present marker means the batch is
+     * already in the player's data, so it is only consumed. If anything fails
+     * before that save completes, the placement and marker are undone and the
+     * batch stays pending. Nothing is ever dropped on the ground.
+     */
+    KeptRestore restoreKeptBatch(ServerPlayer player, KeptBatch batch,
+            java.util.function.Supplier<List<SlottedInventory.SlottedStack>> decode, PlayerSave save) {
         UUID uuid = player.getUUID();
+        String name = player.getName().getString();
         String marker = KEPT_MARKER_PREFIX + batch.batchId;
-        SlottedInventory.PlaceResult result = null;
-        if (!player.entityTags().contains(marker)) {
-            SlottedInventory.DecodeResult decoded = SlottedInventory.decodeAll(player.level(), batch.items);
-            if (decoded.failures() != 0) {
+        boolean alreadyPlaced = player.entityTags().contains(marker);
+        if (!alreadyPlaced) {
+            List<SlottedInventory.SlottedStack> items = decode.get();
+            if (items == null) {
                 Combatpersistence.LOGGER.error("Kept combat-log items for {} cannot be decoded; batch {} retained for staff repair",
-                    player.getName().getString(), batch.batchId);
-                return false;
+                    name, batch.batchId);
+                return KeptRestore.REFUSED;
             }
-            result = SlottedInventory.place(player, decoded.items(), false);
-            player.addTag(marker);
+            net.minecraft.world.entity.player.Inventory inventory = player.getInventory();
+            KeptPlacement plan = planKeptPlacement(inventory, items);
+            if (plan.missingSlots() > 0) {
+                Combatpersistence.debug("Kept batch {} for {} needs {} more free slots; left pending", batch.batchId, name, plan.missingSlots());
+                return new KeptRestore(KeptOutcome.NO_ROOM, plan.missingSlots());
+            }
+            if (!player.addTag(marker)) {
+                // Vanilla caps entity tags at 1024. Without the marker the
+                // placement could not be made idempotent, so do not place.
+                Combatpersistence.LOGGER.error("Could not tag {} for kept batch {} (tag limit reached?); batch retained", name, batch.batchId);
+                return KeptRestore.REFUSED;
+            }
+            List<Integer> placed = new ArrayList<>();
             try {
-                PlayerDataPersistence.save(player);
+                for (int i = 0; i < items.size(); i++) {
+                    inventory.setItem(plan.slots()[i], items.get(i).stack());
+                    placed.add(plan.slots()[i]);
+                }
+                save.save(player);
             } catch (RuntimeException error) {
-                // The marker stays in memory, so this session never places the
-                // batch twice; vanilla's next save writes items and marker together.
-                // Withhold overflow: dropping it could duplicate after a crash.
-                Combatpersistence.LOGGER.error("Could not commit kept items for {}; batch {} retained",
-                    player.getName().getString(), batch.batchId, error);
-                return false;
+                try {
+                    for (int slot : placed) inventory.setItem(slot, ItemStack.EMPTY);
+                    player.removeTag(marker);
+                } catch (RuntimeException undoError) {
+                    // Keep the marker: a later consume without placement is
+                    // safer than placing this batch a second time.
+                    Combatpersistence.LOGGER.error("Could not undo kept batch {} for {}; marker kept", batch.batchId, name, undoError);
+                }
+                Combatpersistence.LOGGER.error("Could not commit kept items for {}; batch {} retained", name, batch.batchId, error);
+                return KeptRestore.REFUSED;
             }
-            Combatpersistence.debug("Returned {} kept items to {} ({} exact slot, {} loose, {} overflow)",
-                decoded.items().size(), player.getName().getString(), result.exact(), result.loose(), result.dropped());
+            Combatpersistence.debug("Returned {} kept items to {}", items.size(), name);
         }
         try {
             removeKeptBatch(uuid, batch.batchId);
@@ -365,15 +474,67 @@ public class CombatTracker {
         } catch (RuntimeException error) {
             // The marker in player.dat prevents a second placement on retry.
             Combatpersistence.LOGGER.error("Could not consume kept batch {} for {}; it will be cleared on the next restore",
-                batch.batchId, player.getName().getString(), error);
+                batch.batchId, name, error);
         }
-        // Overflow is not part of player.dat; release it exactly once, now.
-        if (result != null) {
-            result.dropOverflow(player);
-            player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
-                Combatpersistence.config.keptItemsRestoredMessage));
+        return new KeptRestore(alreadyPlaced ? KeptOutcome.ALREADY_PLACED : KeptOutcome.RESTORED, 0);
+    }
+
+    // ---------------------------------------------------------------- NPC team entries
+
+    /** Records an NPC's scoreboard team entry before it is added, so it can always be cleaned up. */
+    public void recordNpcTeamEntry(UUID npcUuid) {
+        if (!npcTeamEntries.add(npcUuid)) return;
+        try {
+            saveData(false);
+        } catch (RuntimeException error) {
+            npcTeamEntries.remove(npcUuid);
+            throw error;
         }
-        return true;
+    }
+
+    /** Removes an NPC's team entry (loaded or not) and forgets it. */
+    public void releaseNpcTeam(Scoreboard scoreboard, UUID npcUuid) {
+        String entry = npcUuid.toString();
+        PlayerTeam team = scoreboard.getPlayersTeam(entry);
+        if (team != null) scoreboard.removePlayerFromTeam(entry, team);
+        if (npcTeamEntries.remove(npcUuid)) saveData(true);
+    }
+
+    /**
+     * Startup cleanup. NPCs are never saved, and chunk unload or server stop
+     * can skip the removal hook, so recorded team entries can outlive them.
+     * Only UUIDs this mod recorded are touched: real player names and other
+     * entities that operators put on teams are never removed.
+     *
+     * @return how many stale entries were removed from a team
+     */
+    public int sweepNpcTeamEntries(Scoreboard scoreboard, java.util.function.Predicate<UUID> isLoaded) {
+        int removed = 0;
+        boolean changed = false;
+        for (UUID npcUuid : List.copyOf(npcTeamEntries)) {
+            if (isLoaded.test(npcUuid)) continue;
+            String entry = npcUuid.toString();
+            PlayerTeam team = scoreboard.getPlayersTeam(entry);
+            if (team != null) {
+                scoreboard.removePlayerFromTeam(entry, team);
+                removed++;
+            }
+            npcTeamEntries.remove(npcUuid);
+            changed = true;
+        }
+        if (changed) {
+            try {
+                saveData(false);
+            } catch (RuntimeException error) {
+                // Only bookkeeping: an entry kept on disk is swept again next start.
+                Combatpersistence.LOGGER.error("Could not save the NPC team sweep", error);
+            }
+        }
+        return removed;
+    }
+
+    Set<UUID> getNpcTeamEntries() {
+        return Collections.unmodifiableSet(npcTeamEntries);
     }
 
     private void saveData() {
@@ -386,6 +547,7 @@ public class CombatTracker {
         root.add("pendingJoinDeaths", GSON.toJsonTree(pendingJoinDeaths));
         root.add("activeNPCs", GSON.toJsonTree(activeNPCs));
         root.add("keptItems", GSON.toJsonTree(keptItems));
+        root.add("npcTeamEntries", GSON.toJsonTree(npcTeamEntries));
         Runnable saveAction = () -> DiskIO.writeJson(DATA_FILE, GSON, root);
 
         if (async) {
@@ -453,6 +615,12 @@ public class CombatTracker {
                         keptItems.put(uuid, new ArrayList<>(batches));
                     });
                 }
+                if (root.has("npcTeamEntries")) {
+                    Type setType = new TypeToken<HashSet<UUID>>(){}.getType();
+                    Set<UUID> loaded = GSON.fromJson(root.get("npcTeamEntries"), setType);
+                    if (loaded == null || loaded.contains(null)) throw new IllegalStateException("Invalid NPC team data");
+                    npcTeamEntries.addAll(loaded);
+                }
                 pendingJoinDeaths.addAll(offlineDeaths);
             } catch (Exception e) {
                 throw new IllegalStateException("Refusing to start with unreadable combat recovery data", e);
@@ -499,7 +667,7 @@ public class CombatTracker {
                             break;
                         }
                     }
-                    CombatNPC.leaveTeam(server.getScoreboard(), npcData.npcUuid);
+                    releaseNpcTeam(server.getScoreboard(), npcData.npcUuid);
                     Combatpersistence.debug("Combat tag expired for {}; NPC {} discarded, tracker entry kept for rejoin restore",
                         playerUuid, npcData.npcUuid);
                 }

@@ -15,7 +15,6 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.ResolvableProfile;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.PlayerTeam;
-import net.minecraft.world.scores.Scoreboard;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -142,7 +141,13 @@ public class CombatNPC extends Mannequin {
         // colours, allies) apply to the NPC as they did to its owner.
         PlayerTeam ownerTeam = original.getTeam();
         if (ownerTeam != null) {
-            world.getScoreboard().addPlayerToTeam(npc.getScoreboardName(), ownerTeam);
+            try {
+                // Recorded first, so a crash can never leave an unknown entry behind.
+                Combatpersistence.tracker.recordNpcTeamEntry(npc.getUUID());
+                world.getScoreboard().addPlayerToTeam(npc.getScoreboardName(), ownerTeam);
+            } catch (RuntimeException error) {
+                Combatpersistence.LOGGER.error("Could not add CombatNPC {} to team {}", npc.getUUID(), ownerTeam.getName(), error);
+            }
         }
 
         if (config.playSpawnSound) {
@@ -154,19 +159,19 @@ public class CombatNPC extends Mannequin {
         return npc;
     }
 
-    /** Removes an NPC's scoreboard team entry, whether or not the entity is still loaded. */
-    public static void leaveTeam(Scoreboard scoreboard, UUID npcUuid) {
-        String entry = npcUuid.toString();
-        PlayerTeam team = scoreboard.getPlayersTeam(entry);
-        if (team != null) scoreboard.removePlayerFromTeam(entry, team);
-    }
-
     @Override
-    public void remove(RemovalReason reason) {
-        super.remove(reason);
-        // Covers discard (rejoin, tag expiry), death and unload. The NPC is never
-        // saved, so its team entry must not outlive the entity.
-        if (this.level() instanceof ServerLevel world) leaveTeam(world.getScoreboard(), this.getUUID());
+    public void onRemoval(RemovalReason reason) {
+        super.onRemoval(reason);
+        // Entity.setRemoved always calls this, including the chunk-unload path
+        // (PersistentEntitySectionManager.unloadEntity), which bypasses remove().
+        // The NPC is never saved, so its team entry must not outlive the entity.
+        if (this.level() instanceof ServerLevel world) {
+            try {
+                Combatpersistence.tracker.releaseNpcTeam(world.getScoreboard(), this.getUUID());
+            } catch (RuntimeException error) {
+                Combatpersistence.LOGGER.error("Could not remove CombatNPC {} from its team", this.getUUID(), error);
+            }
+        }
     }
 
     @Override

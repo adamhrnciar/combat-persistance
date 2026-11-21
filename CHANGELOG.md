@@ -5,7 +5,7 @@
 ### Compatibility
 
 - Minecraft 26.2 build, Fabric Loader 0.20.1 and Fabric API 0.161.0+26.2. Java 25 or later.
-- Existing `combat_persistence_data.json` files load unchanged; the new `keptItems` section is added on the next save.
+- Existing `combat_persistence_data.json` files load unchanged; the new `keptItems` and `npcTeamEntries` sections are added on the next save.
 
 ### API for other mods
 
@@ -16,13 +16,19 @@
 
 ### Teams
 
-- The NPC joins its owner's scoreboard team and leaves it when it is discarded, dies or unloads.
-- A player on the same team cannot damage the NPC when that team has friendly fire turned off, so teammates cannot kill or loot it.
+- The NPC joins its owner's scoreboard team. It leaves the team on any removal, including chunk unload. Entries left behind by a crash or server stop are removed at the next startup; only NPC UUIDs this mod recorded are touched.
+- When the owner's current team has friendly fire off, a teammate cannot damage the NPC directly, with projectiles, through their pets or with TNT they lit, so teammates cannot kill or loot it. Environmental damage (lava, fire, redstone-lit TNT, suffocation) is not blocked.
 
 ### Inventory safety
 
-- Each kept-item batch is placed at most once: the player save that holds the items also holds a marker, and only then is the batch consumed. Overflow is dropped only after the player save succeeds.
-- New config message `keptItemsRestoredMessage`.
+- Kept items are returned only when the whole batch fits into empty inventory slots. Otherwise the batch stays pending, the player is told how many slots to free, and it is retried on the next join, login or respawn. Nothing is ever dropped on the ground.
+- Each batch is placed at most once. A marker tag is added before any item is placed, and the player data holding items and marker is saved before the batch is consumed. If that save fails, the placement and marker are undone and the batch stays pending. If the tag cannot be added (vanilla's 1024-tag limit), nothing is placed.
+- New config messages `keptItemsRestoredMessage` and `keptItemsNeedSpaceMessage`.
+
+### Upgrade and downgrade notes
+
+- Back up the world together with `config/combat_persistence_data.json` before upgrading.
+- Only downgrade to 1.10.x when no `keptItems` are pending in `combat_persistence_data.json`. 1.10.x ignores that section and drops it on its next save, which loses those items.
 
 ## 1.10.0
 

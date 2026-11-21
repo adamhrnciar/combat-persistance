@@ -36,6 +36,8 @@ public class Combatpersistence implements ModInitializer {
         CombatEvents.register(tracker, config);
         AuthCommands.register();
 
+        ServerLifecycleEvents.SERVER_STARTED.register(CombatEvents::sweepStaleNpcTeams);
+
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             LOGGER.info("Saving combat and auth data synchronously for server shutdown...");
             tracker.stop();

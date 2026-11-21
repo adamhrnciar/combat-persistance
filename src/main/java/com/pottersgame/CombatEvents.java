@@ -19,7 +19,10 @@ import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.entity.OwnableEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -54,10 +57,11 @@ public class CombatEvents {
             }
             if (entity instanceof CombatNPC victimNpc) {
                 Entity attackerEntity = source.getEntity();
+                // Honour the owner's team friendly-fire rule so teammates cannot
+                // kill and loot the NPC, directly or through projectiles, pets or
+                // TNT they lit (all of which report the player or pet as the source).
+                if (isProtectedTeammate(attackerEntity, victimNpc)) return false;
                 if (attackerEntity instanceof ServerPlayer attacker && Combatpersistence.authManager.isAuthenticated(attacker)) {
-                    // The NPC joins its owner's scoreboard team. Honour that team's
-                    // friendly-fire rule so teammates cannot kill and loot it.
-                    if (isProtectedTeammate(attacker, victimNpc)) return false;
                     if (!attacker.getAbilities().instabuild) {
                         tracker.tag(attacker, config.combatTagDurationSeconds);
                     }
@@ -385,10 +389,32 @@ public class CombatEvents {
         joinTimes.remove(uuid);
     }
 
-    /** A teammate may not damage an NPC whose team has friendly fire turned off. */
-    static boolean isProtectedTeammate(ServerPlayer attacker, CombatNPC npc) {
-        PlayerTeam team = npc.getTeam();
-        return team != null && attacker.getTeam() == team && !team.isAllowFriendlyFire();
+    /**
+     * Whether the attacker (a player, or a pet whose owner is online) is on the
+     * owner's current team and that team has friendly fire off. The owner's
+     * team is looked up by name, so a team change while offline counts; the
+     * NPC's own team entry is the fallback.
+     */
+    static boolean isProtectedTeammate(Entity attacker, CombatNPC npc) {
+        Player responsible = null;
+        if (attacker instanceof Player player) responsible = player;
+        else if (attacker instanceof OwnableEntity pet && pet.getOwner() instanceof Player owner) responsible = owner;
+        if (responsible == null) return false;
+        Scoreboard scoreboard = npc.level().getScoreboard();
+        PlayerTeam team = npc.originalPlayerName != null ? scoreboard.getPlayersTeam(npc.originalPlayerName) : null;
+        if (team == null) team = npc.getTeam();
+        return team != null && responsible.getTeam() == team && !team.isAllowFriendlyFire();
+    }
+
+    /** Removes team entries of NPCs that did not survive the last shutdown. */
+    public static void sweepStaleNpcTeams(MinecraftServer server) {
+        int removed = Combatpersistence.tracker.sweepNpcTeamEntries(server.getScoreboard(), uuid -> {
+            for (ServerLevel level : server.getAllLevels()) {
+                if (level.getEntity(uuid) != null) return true;
+            }
+            return false;
+        });
+        if (removed > 0) Combatpersistence.LOGGER.info("Removed {} stale combat NPC team entries", removed);
     }
 
     private static void teleportToLobby(MinecraftServer server, ServerPlayer player, CombatConfig config) {
@@ -426,7 +452,7 @@ public class CombatEvents {
                 }
             }
             // Also covers an NPC that is no longer loaded (chunk unload, restart).
-            CombatNPC.leaveTeam(server.getScoreboard(), npcUuid);
+            tracker.releaseNpcTeam(server.getScoreboard(), npcUuid);
         }
         // Restore inventory from tracker (handles removing entry)
         tracker.restoreInventory(player);
