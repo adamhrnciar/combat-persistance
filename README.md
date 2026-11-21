@@ -36,7 +36,7 @@ For older Minecraft versions, use the version list on [Modrinth](https://modrint
 - Blocks `/spawn`, `/home`, `/tp`, `/tpa`, `/warp` and `/back` during combat. Add your own commands or aliases to the list.
 - Saves the inventory to disk when someone combat logs, so a restart or chunk unload doesn't eat their items.
 - Can turn off ender chests server-wide if you run an arena.
-- Puts the mannequin on its owner's scoreboard team. With friendly fire off, teammates can't kill or loot it.
+- Puts the mannequin on its owner's scoreboard team. With friendly fire off, teammates can't damage it directly, with projectiles, through their pets or with TNT they lit, so they can't kill or loot it. Environmental damage (lava, fire, redstone-lit TNT, suffocation) still hurts it.
 - Lets other server mods react to mannequin kills and keep chosen items. See [API for other mods](#api-for-other-mods).
 - Has an optional `/register` and `/login` system for offline-mode servers. Online-mode players never see it.
 
@@ -145,7 +145,11 @@ public final class CombatPersistenceCompat {
 }
 ```
 
-The NPC joins its owner's scoreboard team. If that team has friendly fire off, teammates cannot damage it.
+Kept items come back only when the whole batch fits in the player's empty inventory slots. Otherwise the player is told how many slots to free, and the items wait until their next join, login or respawn. They are never dropped on the ground.
+
+The NPC joins its owner's scoreboard team. If the owner's team has friendly fire off, teammates can't damage it directly, with projectiles, through their pets or with TNT they lit. Environmental damage is not blocked.
+
+Only downgrade to 1.10.x when `combat_persistence_data.json` has no pending `keptItems`. Older versions drop that section.
 
 ## Security
 

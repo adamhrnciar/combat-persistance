@@ -31,6 +31,8 @@ public class CombatConfig {
     public String inventoryRestoredMessage = "§aYour inventory has been restored.";
     // Sent after respawn when another mod kept some items from a killed combat-log NPC.
     public String keptItemsRestoredMessage = "§aSome of your items were kept and have been returned.";
+    // Kept items are only returned when they all fit; %s = free slots still needed.
+    public String keptItemsNeedSpaceMessage = "§eSome kept items are waiting for you. Free %s more inventory slots, then rejoin or respawn to receive them.";
     public String commandBlockedInCombatMessage = "§cYou cannot use this command while in combat!";
     public String loginTimeoutMessage = "§cLogin timeout!";
     public String registerPrompt = "§6Please register using /register <password> <confirmPassword>";
@@ -181,7 +183,7 @@ public class CombatConfig {
     }
 
     private void validateFormats(CombatConfig defaults) {
-        String[] formatted = {"combatMessage", "npcDeathBroadcast", "passwordTooShort", "passwordTooLong",
+        String[] formatted = {"combatMessage", "npcDeathBroadcast", "keptItemsNeedSpaceMessage", "passwordTooShort", "passwordTooLong",
             "skinAppliedMessage", "skinCooldownMessage", "accountResetSuccess", "accountResetNotRegistered",
             "loginLockedOutMessage"};
         for (String name : formatted) {
