@@ -19,7 +19,7 @@ public class CombatDeathMixin {
     @Inject(method = "die", at = @At("HEAD"))
     private void onDie(DamageSource damageSource, CallbackInfo ci) {
         LivingEntity entity = (LivingEntity) (Object) this;
-        Combatpersistence.tracker.handleEntityDeath(entity);
+        Combatpersistence.tracker.handleEntityDeath(entity, damageSource);
     }
 
     @Inject(method = "tick", at = @At("HEAD"))

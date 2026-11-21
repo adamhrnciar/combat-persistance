@@ -1,6 +1,7 @@
 package com.pottersgame;
 
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
@@ -18,6 +19,7 @@ import net.minecraft.world.entity.decoration.Mannequin;
 import net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.scores.PlayerTeam;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -53,6 +55,9 @@ public class CombatEvents {
             if (entity instanceof CombatNPC victimNpc) {
                 Entity attackerEntity = source.getEntity();
                 if (attackerEntity instanceof ServerPlayer attacker && Combatpersistence.authManager.isAuthenticated(attacker)) {
+                    // The NPC joins its owner's scoreboard team. Honour that team's
+                    // friendly-fire rule so teammates cannot kill and loot it.
+                    if (isProtectedTeammate(attacker, victimNpc)) return false;
                     if (!attacker.getAbilities().instabuild) {
                         tracker.tag(attacker, config.combatTagDurationSeconds);
                     }
@@ -61,6 +66,18 @@ public class CombatEvents {
                 }
             }
             return true;
+        });
+
+        // Items kept by a KEEP_ON_NPC_DEATH listener come back after the
+        // owner's join-death, once they respawn. Respawn requires an
+        // authenticated listener; otherwise onAuthenticated hands them back.
+        ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
+            if (alive || !Combatpersistence.authManager.isAuthenticated(newPlayer)) return;
+            try {
+                tracker.restoreKeptItems(newPlayer);
+            } catch (RuntimeException error) {
+                Combatpersistence.LOGGER.error("Could not return kept items to {}", newPlayer.getName().getString(), error);
+            }
         });
 
         UseEntityCallback.EVENT.register((player, world, hand, entity, hitResult) -> {
@@ -177,6 +194,8 @@ public class CombatEvents {
                 } else {
                     Combatpersistence.authManager.restorePreAuthInventory(player);
                     cleanUpNpc(player, tracker, server);
+                    // After the NPC restore, which replaces the live inventory.
+                    tracker.restoreKeptItems(player);
                 }
 
                 // If this is an offline server, apply the skin (online servers do this automatically)
@@ -366,6 +385,12 @@ public class CombatEvents {
         joinTimes.remove(uuid);
     }
 
+    /** A teammate may not damage an NPC whose team has friendly fire turned off. */
+    static boolean isProtectedTeammate(ServerPlayer attacker, CombatNPC npc) {
+        PlayerTeam team = npc.getTeam();
+        return team != null && attacker.getTeam() == team && !team.isAllowFriendlyFire();
+    }
+
     private static void teleportToLobby(MinecraftServer server, ServerPlayer player, CombatConfig config) {
         ServerLevel lobbyLevel = server.getLevel(config.lobbyDimensionKey());
         if (lobbyLevel == null) return;
@@ -400,6 +425,8 @@ public class CombatEvents {
                     break;
                 }
             }
+            // Also covers an NPC that is no longer loaded (chunk unload, restart).
+            CombatNPC.leaveTeam(server.getScoreboard(), npcUuid);
         }
         // Restore inventory from tracker (handles removing entry)
         tracker.restoreInventory(player);

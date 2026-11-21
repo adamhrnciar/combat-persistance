@@ -29,6 +29,8 @@ public class CombatConfig {
     // lifecycle — for debugging on production servers. Errors always log.
     public boolean debugLogging = false;
     public String inventoryRestoredMessage = "§aYour inventory has been restored.";
+    // Sent after respawn when another mod kept some items from a killed combat-log NPC.
+    public String keptItemsRestoredMessage = "§aSome of your items were kept and have been returned.";
     public String commandBlockedInCombatMessage = "§cYou cannot use this command while in combat!";
     public String loginTimeoutMessage = "§cLogin timeout!";
     public String registerPrompt = "§6Please register using /register <password> <confirmPassword>";
