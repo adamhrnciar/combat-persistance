@@ -149,6 +149,22 @@ public class CombatTracker {
         return false;
     }
 
+    /**
+     * Whether a combat NPC may still be in the world: it has a tracker entry
+     * and its owner is still combat-tagged. Once the tag runs out the NPC must
+     * go (its entry stays for the rejoin restore), even if tick() could not
+     * find it because its chunk was loaded but not tracked at that moment.
+     */
+    public boolean isNpcLive(UUID npcUuid) {
+        for (ActiveNPCData data : activeNPCs.values()) {
+            if (data.npcUuid.equals(npcUuid)) {
+                Long endTime = combatEndTimes.get(data.playerUuid);
+                return endTime != null && System.currentTimeMillis() < endTime;
+            }
+        }
+        return false;
+    }
+
     public void removeNPC(UUID playerUuid) {
         getAndRemoveNPCData(playerUuid);
     }
@@ -275,6 +291,13 @@ public class CombatTracker {
 
         for (ActiveNPCData data : activeNPCs.values()) {
             if (data.npcUuid.equals(entityUuid)) {
+                if (!isNpcLive(entityUuid)) {
+                    // Owner's tag already ran out: this NPC should be gone. Keep
+                    // the entry so the owner gets the items back on rejoin.
+                    Combatpersistence.LOGGER.warn("NPC {} died after its owner's combat tag ended; no loot, items stay with {}",
+                        entityUuid, data.playerUuid);
+                    return;
+                }
                 dropNpcInventory(entity, data, source);
                 return;
             }

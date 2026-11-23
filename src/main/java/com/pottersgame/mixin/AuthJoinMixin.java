@@ -47,6 +47,19 @@ public abstract class AuthJoinMixin {
             ci.cancel();
             return;
         }
+        // A live login lockout (account or source IP) refuses the connection
+        // here, before vanilla adds the player. Disconnecting later from the
+        // JOIN event could leave a half-joined player behind.
+        if (Combatpersistence.authManager.authRequired(server)) {
+            int lockoutSecs = Combatpersistence.authManager.getLockoutSecondsRemaining(
+                player.getUUID(), connection.getRemoteAddress());
+            if (lockoutSecs > 0) {
+                connection.disconnect(Component.literal(
+                    String.format(Combatpersistence.config.loginLockedOutMessage, lockoutSecs)));
+                ci.cancel();
+                return;
+            }
+        }
         try {
             CombatEvents.preparePlayerJoin(player, server);
         } catch (RuntimeException error) {
