@@ -213,7 +213,10 @@ public class CombatEvents {
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             long now = System.currentTimeMillis();
 
-            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            // Iterate a copy: disconnecting a player on login timeout removes them
+            // from the live player list, which would throw CME and crash the server.
+            for (ServerPlayer player : List.copyOf(server.getPlayerList().getPlayers())) {
+                if (player.hasDisconnected()) continue;
                 UUID uuid = player.getUUID();
 
                 // isAuthenticated is true whenever the auth flow doesn't apply
