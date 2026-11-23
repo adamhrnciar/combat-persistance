@@ -304,10 +304,15 @@ public class AuthManager {
 
     /** Seconds remaining on a login lockout for this player (account or source IP), or 0 if not locked out. */
     public int getLockoutSecondsRemaining(ServerPlayer player) {
+        return getLockoutSecondsRemaining(player.getUUID(), player.connection.getRemoteAddress());
+    }
+
+    /** Same check for a connection that has no play listener yet. */
+    public int getLockoutSecondsRemaining(UUID uuid, java.net.SocketAddress address) {
         long lockedUntil = 0;
-        LoginAttempts att = loginAttempts.get(player.getUUID());
+        LoginAttempts att = loginAttempts.get(uuid);
         if (att != null) lockedUntil = att.lockedUntil;
-        LoginAttempts ipAtt = ipLoginAttempts.get(getIp(player));
+        LoginAttempts ipAtt = ipLoginAttempts.get(ipOf(address));
         if (ipAtt != null) lockedUntil = Math.max(lockedUntil, ipAtt.lockedUntil);
         long remaining = lockedUntil - System.currentTimeMillis();
         return remaining > 0 ? (int) Math.ceil(remaining / 1000.0) : 0;
@@ -483,6 +488,10 @@ public class AuthManager {
         // high container indices, cursor/crafting as slotless extras.
         List<SlottedInventory.SlotItem> encoded =
             SlottedInventory.encodeAll(world, SlottedInventory.snapshot(player));
+        // Nothing to hide or protect: skip the synchronous disk write (and the
+        // one restore would do). Restore without a stash leaves the live
+        // inventory alone, which is just as empty.
+        if (encoded.isEmpty()) return;
 
         preAuthInventories.put(uuid, encoded);
         // Synchronous: durably persist the stash BEFORE destroying the live copy.
@@ -551,12 +560,16 @@ public class AuthManager {
     }
 
     private String getIp(ServerPlayer player) {
+        return ipOf(player.connection.getRemoteAddress());
+    }
+
+    private static String ipOf(java.net.SocketAddress address) {
         // InetSocketAddress handles IPv6 correctly; naive string splitting on ':'
         // mangled IPv6 addresses into useless fragments.
-        if (player.connection.getRemoteAddress() instanceof InetSocketAddress inet && inet.getAddress() != null) {
+        if (address instanceof InetSocketAddress inet && inet.getAddress() != null) {
             return inet.getAddress().getHostAddress();
         }
-        String addr = player.connection.getRemoteAddress().toString();
+        String addr = address.toString();
         if (addr.startsWith("/")) addr = addr.substring(1);
         return addr.split(":")[0];
     }

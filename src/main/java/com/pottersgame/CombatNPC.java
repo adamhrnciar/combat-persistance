@@ -218,9 +218,11 @@ public class CombatNPC extends Mannequin {
         this.setDeltaMovement(new Vec3(0, this.getDeltaMovement().y, 0));
 
         // Safety net: if the tracker no longer knows this NPC (player rejoined and
-        // was restored, or the entry was cleaned up), the entity must not linger.
+        // was restored, or the entry was cleaned up) or the owner's combat tag ran
+        // out while tick() could not see this entity, it must not linger. Discard
+        // drops nothing; the tracker entry still restores the items on rejoin.
         if (!this.level().isClientSide() && this.tickCount % 20 == 0 && !this.isRemoved()
-                && !Combatpersistence.tracker.isNpcActive(this.getUUID())) {
+                && !Combatpersistence.tracker.isNpcLive(this.getUUID())) {
             this.discard();
         }
     }

@@ -30,6 +30,16 @@ public abstract class AuthJoinMixin {
                                  CallbackInfoReturnable<Component> cir) {
         if (hasDuplicate(profile)) cir.setReturnValue(Component.literal("This player is already connected."));
         else if (Combatpersistence.authManager.authRequired(server)) {
+            // A live login lockout (account or source IP) refuses the login here,
+            // before vanilla spawns anything. Refusing later (JOIN, or cancelling
+            // placeNewPlayer) can leave a half-joined player or their saved
+            // vehicle behind.
+            int lockoutSecs = Combatpersistence.authManager.getLockoutSecondsRemaining(profile.id(), address);
+            if (lockoutSecs > 0) {
+                cir.setReturnValue(Component.literal(
+                    String.format(Combatpersistence.config.loginLockedOutMessage, lockoutSecs)));
+                return;
+            }
             java.util.UUID registered = Combatpersistence.authManager.findRegisteredUuidByName(profile.name(), false);
             if (registered != null && !registered.equals(profile.id())) {
                 cir.setReturnValue(Component.literal("Use the exact registered spelling of your player name."));

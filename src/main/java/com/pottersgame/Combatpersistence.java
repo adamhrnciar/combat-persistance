@@ -38,12 +38,27 @@ public class Combatpersistence implements ModInitializer {
 
         ServerLifecycleEvents.SERVER_STARTED.register(CombatEvents::sweepStaleNpcTeams);
 
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-            LOGGER.info("Saving combat and auth data synchronously for server shutdown...");
-            tracker.stop();
-            authManager.flush();
-        });
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> saveOnShutdown(tracker, authManager));
 
         LOGGER.info("Combat tag duration is set to {} seconds.", config.combatTagDurationSeconds);
+    }
+
+    /**
+     * Runs at the head of MinecraftServer.stopServer, before vanilla saves
+     * players and worlds. A failed write here must not escape and abort those
+     * saves, and one failed store must not skip the other.
+     */
+    static void saveOnShutdown(CombatTracker tracker, AuthManager auth) {
+        LOGGER.info("Saving combat and auth data synchronously for server shutdown...");
+        try {
+            tracker.stop();
+        } catch (RuntimeException error) {
+            LOGGER.error("Could not save combat data on shutdown", error);
+        }
+        try {
+            auth.flush();
+        } catch (RuntimeException error) {
+            LOGGER.error("Could not save auth data on shutdown", error);
+        }
     }
 }

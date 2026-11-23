@@ -3,6 +3,7 @@ package com.pottersgame;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
@@ -29,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class CombatEvents {
 
-    private static final Map<UUID, Long> joinTimes = new ConcurrentHashMap<>();
+    static final Map<UUID, Long> joinTimes = new ConcurrentHashMap<>();
 
     public static void register(CombatTracker tracker, CombatConfig config) {
 
@@ -56,6 +57,10 @@ public class CombatEvents {
                 }
             }
             if (entity instanceof CombatNPC victimNpc) {
+                // An NPC whose owner is no longer tagged (or that has no tracker
+                // entry) is about to be discarded; killing it must not drop the
+                // owner's items or mark them for a join-death.
+                if (!tracker.isNpcLive(victimNpc.getUUID())) return false;
                 Entity attackerEntity = source.getEntity();
                 // Honour the owner's team friendly-fire rule so teammates cannot
                 // kill and loot the NPC, directly or through projectiles, pets or
@@ -122,22 +127,8 @@ public class CombatEvents {
         });
 
         // CRITICAL FIX: Chunk Unload Dupe - Discard NPCs on load if they are no longer in active tracker
-        ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
-            if (entity instanceof CombatNPC) {
-                if (!tracker.isNpcActive(entity.getUUID())) {
-                    entity.discard();
-                    Combatpersistence.debug("Discarded stale CombatNPC {} on load (no tracker entry)", entity.getUUID());
-                }
-            } else if (entity instanceof Mannequin && tracker.isNpcActive(entity.getUUID())) {
-                // NPCs saved to disk by older versions reload as plain vanilla
-                // mannequins (they share the mannequin entity type) with none of the
-                // CombatNPC despawn logic. CombatNPCs are never saved anymore, so any
-                // tracked NPC UUID loading from a chunk is such a stale leftover. The
-                // tracker entry stays so the player still gets their items on rejoin.
-                entity.discard();
-                Combatpersistence.debug("Discarded stale legacy mannequin {} on load (tracker entry kept)", entity.getUUID());
-            }
-        });
+        ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> onEntityLoad(entity, tracker));
+        ServerLifecycleEvents.SERVER_STOPPED.register(server -> pendingDiscards.clear());
 
         // NOTE: combat-log handling deliberately does NOT use Fabric's
         // DISCONNECT event — it lives in handlePlayerRemove, invoked from
@@ -153,17 +144,8 @@ public class CombatEvents {
             ServerPlayer player = handler.getPlayer();
             UUID uuid = player.getUUID();
 
-            // A live login lockout (account or source IP) refuses the connection
-            // outright — checked before any other join processing so a locked-out
-            // player can't even reach the lobby to retry.
-            if (Combatpersistence.authManager.authRequired(server)) {
-                int lockoutSecs = Combatpersistence.authManager.getLockoutSecondsRemaining(player);
-                if (lockoutSecs > 0) {
-                    player.connection.disconnect(Component.literal(
-                        String.format(config.loginLockedOutMessage, lockoutSecs)));
-                    return;
-                }
-            }
+            // A live login lockout is refused in AuthJoinMixin, before vanilla
+            // adds the player, so a locked-out player never gets this far.
 
             joinTimes.put(uuid, System.currentTimeMillis());
 
@@ -210,69 +192,111 @@ public class CombatEvents {
             }
         });
 
-        ServerTickEvents.END_SERVER_TICK.register(server -> {
-            long now = System.currentTimeMillis();
+        ServerTickEvents.END_SERVER_TICK.register(server -> onEndServerTick(server, tracker, config));
+    }
 
-            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                UUID uuid = player.getUUID();
+    /**
+     * Stale NPCs found by ENTITY_LOAD. Fabric fires that event from vanilla's
+     * onTrackingStart, which can run while a chunk section's entity list is
+     * being streamed (a loaded chunk becoming tracked again); discarding there
+     * removes the entity from that list and throws CME. They are discarded at
+     * the end of the server tick instead. Server thread only.
+     */
+    private static final List<Entity> pendingDiscards = new ArrayList<>();
 
-                // isAuthenticated is true whenever the auth flow doesn't apply
-                // (auth disabled, online-mode server), so this only ever gates
-                // players actually stuck in the login window.
-                if (!Combatpersistence.authManager.isAuthenticated(player)) {
-                    Long joinTime = joinTimes.get(uuid);
-                    if (joinTime != null && (now - joinTime) > (config.authTimeoutSeconds * 1000L)) {
-                        player.connection.disconnect(Component.literal(config.loginTimeoutMessage));
-                        continue;
+    static void onEntityLoad(Entity entity, CombatTracker tracker) {
+        if (entity instanceof CombatNPC) {
+            if (!tracker.isNpcLive(entity.getUUID())) {
+                pendingDiscards.add(entity);
+                Combatpersistence.debug("Stale CombatNPC {} loaded (no tracker entry or owner no longer tagged); discarding at tick end",
+                    entity.getUUID());
+            }
+        } else if (entity instanceof Mannequin && tracker.isNpcActive(entity.getUUID())) {
+            // NPCs saved to disk by older versions reload as plain vanilla
+            // mannequins (they share the mannequin entity type) with none of the
+            // CombatNPC despawn logic. CombatNPCs are never saved anymore, so any
+            // tracked NPC UUID loading from a chunk is such a stale leftover. The
+            // tracker entry stays so the player still gets their items on rejoin.
+            pendingDiscards.add(entity);
+            Combatpersistence.debug("Stale legacy mannequin {} loaded (tracker entry kept); discarding at tick end", entity.getUUID());
+        }
+    }
+
+    private static void discardPendingEntities() {
+        if (pendingDiscards.isEmpty()) return;
+        List<Entity> stale = List.copyOf(pendingDiscards);
+        pendingDiscards.clear();
+        for (Entity entity : stale) {
+            if (!entity.isRemoved()) entity.discard();
+        }
+    }
+
+    static void onEndServerTick(MinecraftServer server, CombatTracker tracker, CombatConfig config) {
+        discardPendingEntities();
+        long now = System.currentTimeMillis();
+
+        // Iterate a copy: disconnecting a player on login timeout removes them
+        // from the live player list, which would throw CME and crash the server.
+        for (ServerPlayer player : List.copyOf(server.getPlayerList().getPlayers())) {
+            if (player.hasDisconnected()) continue;
+            UUID uuid = player.getUUID();
+
+            // isAuthenticated is true whenever the auth flow doesn't apply
+            // (auth disabled, online-mode server), so this only ever gates
+            // players actually stuck in the login window.
+            if (!Combatpersistence.authManager.isAuthenticated(player)) {
+                Long joinTime = joinTimes.get(uuid);
+                if (joinTime != null && (now - joinTime) > (config.authTimeoutSeconds * 1000L)) {
+                    player.connection.disconnect(Component.literal(config.loginTimeoutMessage));
+                    continue;
+                }
+
+                // CRITICAL FIX: Ender Pearl Lobby Escape - continuously lock to lobby and clear pearls
+                if (config.hideCoordinatesBeforeAuth) {
+                    if (!player.level().dimension().equals(config.lobbyDimensionKey())
+                            || player.distanceToSqr(config.lobbyX, config.lobbyY, config.lobbyZ) > 100) {
+                        teleportToLobby(server, player, config);
                     }
+                }
 
-                    // CRITICAL FIX: Ender Pearl Lobby Escape - continuously lock to lobby and clear pearls
-                    if (config.hideCoordinatesBeforeAuth) {
-                        if (!player.level().dimension().equals(config.lobbyDimensionKey())
-                                || player.distanceToSqr(config.lobbyX, config.lobbyY, config.lobbyZ) > 100) {
-                            teleportToLobby(server, player, config);
-                        }
+                // Clear any thrown ender pearls to prevent teleportation exploits.
+                // Iterate a copy: discarding a pearl deregisters it from the
+                // player's live set, which would throw CME mid-iteration.
+                Set<ThrownEnderpearl> pearls = player.getEnderPearls();
+                if (!pearls.isEmpty()) {
+                    for (ThrownEnderpearl pearl : List.copyOf(pearls)) {
+                        pearl.discard();
                     }
+                }
 
-                    // Clear any thrown ender pearls to prevent teleportation exploits.
-                    // Iterate a copy: discarding a pearl deregisters it from the
-                    // player's live set, which would throw CME mid-iteration.
-                    Set<ThrownEnderpearl> pearls = player.getEnderPearls();
-                    if (!pearls.isEmpty()) {
-                        for (ThrownEnderpearl pearl : List.copyOf(pearls)) {
-                            pearl.discard();
-                        }
-                    }
-
-                    if (server.getTickCount() % 100 == 0) {
-                        if (Combatpersistence.authManager.isRegistered(uuid)) {
-                            player.sendSystemMessage(Component.literal(config.loginPrompt), true);
-                        } else {
-                            player.sendSystemMessage(Component.literal(config.registerPrompt), true);
-                        }
+                if (server.getTickCount() % 100 == 0) {
+                    if (Combatpersistence.authManager.isRegistered(uuid)) {
+                        player.sendSystemMessage(Component.literal(config.loginPrompt), true);
+                    } else {
+                        player.sendSystemMessage(Component.literal(config.registerPrompt), true);
                     }
                 }
             }
+        }
 
-            // Combat tag expiry + NPC discard, once per tick (this used to run per
-            // level, i.e. three times per tick on a vanilla server).
-            tracker.tick(server);
+        // Combat tag expiry + NPC discard, once per tick (this used to run per
+        // level, i.e. three times per tick on a vanilla server).
+        tracker.tick(server);
 
-            Map<UUID, Long> tagged = tracker.getTaggedPlayers();
-            if (!tagged.isEmpty()) {
-                for (Map.Entry<UUID, Long> entry : tagged.entrySet()) {
-                    ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
-                    if (player != null) {
-                        long remainingMillis = Math.max(0, entry.getValue() - now);
-                        if (remainingMillis > 0) {
-                            int seconds = (int) Math.ceil(remainingMillis / 1000.0);
-                            String msg = String.format(config.combatMessage, seconds);
-                            player.sendSystemMessage(Component.literal(msg), true);
-                        }
+        Map<UUID, Long> tagged = tracker.getTaggedPlayers();
+        if (!tagged.isEmpty()) {
+            for (Map.Entry<UUID, Long> entry : tagged.entrySet()) {
+                ServerPlayer player = server.getPlayerList().getPlayer(entry.getKey());
+                if (player != null) {
+                    long remainingMillis = Math.max(0, entry.getValue() - now);
+                    if (remainingMillis > 0) {
+                        int seconds = (int) Math.ceil(remainingMillis / 1000.0);
+                        String msg = String.format(config.combatMessage, seconds);
+                        player.sendSystemMessage(Component.literal(msg), true);
                     }
                 }
             }
-        });
+        }
     }
 
     /** Protect persisted player state before vanilla builds any initial play packet. */
