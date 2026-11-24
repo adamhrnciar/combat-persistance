@@ -2,6 +2,7 @@ package com.pottersgame;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +38,7 @@ public class Combatpersistence implements ModInitializer {
         AuthCommands.register();
 
         ServerLifecycleEvents.SERVER_STARTED.register(CombatEvents::sweepStaleNpcTeams);
+        ServerTickEvents.END_SERVER_TICK.register(PlayerHeads::tick);
 
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> saveOnShutdown(tracker, authManager));
 

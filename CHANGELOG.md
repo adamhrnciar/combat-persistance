@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.0+26.2
+
+### Player heads in chat and tab list
+
+- The server draws each player's head before their name in chat (also `/say`, `/me`, `/msg`, `/teammsg`) and in the tab list, using 26.x player-head text sprites. Vanilla clients see them; no client mod is needed.
+- Works on offline-mode servers, where vanilla clients otherwise show no tab-list heads. Heads use the skin from the player's profile, so they show the skin set by the skin lookup (`enableSkinLookups`).
+- The tab name keeps the team prefix, suffix and colour. A display name set by another mod is kept and only gets the head added. Changes (team, skin) are resent once a second.
+- New config options `showHeadsInChat` and `showHeadsInTab`, both on by default.
+
 ## 1.11.0+26.2
 
 ### Compatibility
