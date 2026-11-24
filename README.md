@@ -88,6 +88,8 @@ The configuration file is located at `config/combatpersistence.json`.
 | `minPasswordLength` | 8 | Minimum password length accepted by `/register`. |
 | `maxPasswordLength` | 64 | Maximum password length (BCrypt truncates beyond 72 bytes, so long passwords are refused rather than silently cut). |
 | `enableSkinLookups` | `false` | Opt in to external Mojang skin requests. Requests disclose the server IP and requested name/UUID. |
+| `showHeadsInChat` | `true` | Show the sender's head before their name in chat, `/say`, `/me` and `/msg`. Works on vanilla clients. |
+| `showHeadsInTab` | `true` | Show each player's head before their name in the tab list, keeping team colours. Works on vanilla clients and offline-mode servers. |
 | `skinCommandCooldownSeconds` | 30 | Cooldown between `/skin` uses, protecting the server's shared Mojang API rate limit. |
 | `hideInventoryBeforeAuth` | `true` | Conceals the player's inventory until they log in. |
 | `hideCoordinatesBeforeAuth`| `true` | Conceals the player's location from unauthenticated users. |

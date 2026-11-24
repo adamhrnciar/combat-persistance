@@ -9,7 +9,9 @@
 		"CombatPickupMixin",
 		"EnderChestBlockMixin",
 		"PlayerAccessor",
-		"PlayerListRemoveMixin"
+		"PlayerListRemoveMixin",
+		"PlayerHeadsChatMixin",
+		"PlayerHeadsTabMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -89,6 +89,10 @@ public class CombatConfig {
     // External skin lookups disclose the requested name/UUID and server IP to
     // Mojang. Administrators must explicitly enable this optional feature.
     public boolean enableSkinLookups = false;
+    // Player heads drawn by the server as text sprites, so vanilla clients see
+    // them too. They show the skin from the player's profile (see enableSkinLookups).
+    public boolean showHeadsInChat = true;
+    public boolean showHeadsInTab = true;
     public boolean hideCoordinatesBeforeAuth = true;
     public boolean hideInventoryBeforeAuth = true;
     public double lobbyX = 0, lobbyY = 1000, lobbyZ = 0;
