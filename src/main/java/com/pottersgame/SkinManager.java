@@ -312,5 +312,16 @@ public class SkinManager {
         server.getPlayerList().sendLevelInfo(player, world);
         server.getPlayerList().sendAllPlayerInfo(player);
         player.containerMenu.sendAllDataToRemote();
+
+        // The respawn packet makes the client build a fresh local player with
+        // 0 XP and no effects. sendAllPlayerInfo -> resetSentInfo() only forces
+        // health/food to be resent, and a same-dimension teleport does not reset
+        // the XP cache either, so the XP bar stayed at 0 until XP changed.
+        player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetExperiencePacket(
+            player.experienceProgress, player.totalExperience, player.experienceLevel));
+        for (net.minecraft.world.effect.MobEffectInstance effect : player.getActiveEffects()) {
+            player.connection.send(new net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket(
+                player.getId(), effect, false));
+        }
     }
 }

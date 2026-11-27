@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1+26.2
+
+### Fixes
+
+- Your XP level no longer shows as 0 after joining or using `/skin`. The skin refresh respawns the player on their own client, which reset the XP bar (and status effect icons) client-side; the server now resends both right after the refresh. Your real XP was never lost.
+
 ## 1.12.0+26.2
 
 ### Player heads in chat and tab list
